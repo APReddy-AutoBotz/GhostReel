@@ -79,7 +79,7 @@ The target user is an independent picture editor handling sound on horror or gen
 
 1. THE GhostReel SHALL start with conservative initial gain that prevents clipping for the starter recipes
 2. THE GhostReel SHALL provide a visible stop control and a labeled volume control
-3. WHEN stop is pressed, THE all audio SHALL cease, and repeated play and stop SHALL never leave audio running
+3. WHEN stop is pressed, THE all audio SHALL cease within 100 ms, and repeated play and stop SHALL never leave audio running
 4. WHEN transitioning between cues or stopping playback, THE GhostReel SHALL apply fade envelopes that prevent audible clicks
 5. IF a drawn strip produces invalid parameter values, THEN THE GhostReel SHALL clamp or substitute safe values without producing unstable audio output
 6. IF a load or export fails, THEN THE GhostReel SHALL show a message and leave the project unchanged
@@ -117,8 +117,8 @@ The target user is an independent picture editor handling sound on horror or gen
 1. WHEN the user adjusts a cue's start marker position, THE GhostReel SHALL move the start marker while keeping the hit marker at its original frame
 2. WHEN the start marker is adjusted, THE GhostReel SHALL refit only the part of the pitch and intensity curves between start and hit, leaving the part between hit and end unchanged
 3. WHEN the user adjusts a cue's end marker position, THE GhostReel SHALL refit only the part of the pitch and intensity curves between hit and end, leaving the part between start and hit unchanged
-4. WHEN the user adjusts the hit marker position, THE GhostReel SHALL move the entire cue (start, hit, and end) together
-5. IF moving markers would place them outside the scene boundaries, THEN THE GhostReel SHALL clamp the markers at frame 0 or the scene end and report the constraint
+4. WHEN the hit marker is moved, THE whole cue SHALL move with its start-to-hit and hit-to-end lengths unchanged
+5. IF the move would push any part of the cue outside the scene, THEN THE GhostReel SHALL limit the move and report it
 6. WHEN any marker is adjusted, THE GhostReel SHALL preserve the cue's waveform and all settings on other layers
 
 ### REQ-D1: Save and Reuse Sound Identities
@@ -161,7 +161,7 @@ The target user is an independent picture editor handling sound on horror or gen
 
 1. THE GhostReel SHALL provide undo and redo controls for strip drawing and marker placement
 2. THE GhostReel SHALL allow the user to save a snapshot of the current cue state on a layer
-3. THE GhostReel SHALL provide a comparison view that shows the current cue alongside one saved snapshot
+3. THE GhostReel SHALL provide a comparison control that toggles both playback and strip display between the current cue and one saved snapshot
 4. WHEN comparing, THE GhostReel SHALL allow the user to play either version
 
 ### REQ-F1: Save and Reopen Projects
@@ -188,7 +188,7 @@ The target user is an independent picture editor handling sound on horror or gen
 3. THE exported file SHALL start at the scene's time origin (frame 0, sample 0)
 4. THE exported file SHALL have a duration exactly equal to the scene duration
 5. WHEN a cue is still sounding at the scene end, THE GhostReel SHALL apply a short fade to prevent clicks
-6. THE mixed output SHALL NOT clip; THE GhostReel SHALL maintain 6 dB of headroom below 0 dBFS
+6. THE exported mix SHALL NOT exceed -6 dBFS peak
 7. THE exported file SHALL use 48 kHz sample rate, 24-bit PCM format, and two channels carrying the same signal
 8. THE exported file format SHALL be WAV
 
@@ -244,7 +244,7 @@ The following capabilities are explicitly excluded from this MVP and must not be
 - Generated synthesis output is repeatable within the same browser session and rendering context, but not promised bit-identical across different browsers or versions.
 - Users will confirm the exported sync by importing the WAV into their editor at the scene start and checking the hit frame.
 - The three starter recipes will be tuned during implementation to produce recognizable, editable sounds.
-- Conservative gain, 6 dB headroom, and click prevention are sufficient for safe auditioning and export; no additional limiting or metering is provided.
+- Conservative gain, 6 dB headroom, and click prevention are sufficient for safe auditioning and export.
 - Local video decode and synthesis for clips up to 60 seconds at 24 fps will perform acceptably on target hardware (current laptop, current Chrome).
 - The project supports two scenes with a shared identity shelf.
 - Waveforms are interpreted as single-cycle repeating waveforms.
@@ -253,10 +253,11 @@ The following capabilities are explicitly excluded from this MVP and must not be
 ## For Design
 
 - Strip visual resolution and edit density: determine the number of editable points per strip during implementation, and document any length-dependent limits discovered.
+- Method for guaranteeing the exported mix does not exceed -6 dBFS peak (REQ-G1.6).
 
 ## Open Questions
 
-1. **Snapshot comparison interface:** Should the comparison view show snapshots side-by-side, as an overlay, or as a toggle? **Recommendation:** Side-by-side comparison for clarity during implementation.
+None.
 
 ## Schedule Fit
 
