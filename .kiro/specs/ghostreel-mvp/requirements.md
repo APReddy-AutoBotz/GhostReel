@@ -12,12 +12,13 @@ The target user is an independent picture editor handling sound on horror or gen
 - **Scene**: A single video clip up to 60 seconds at 24 fps loaded as the reference picture
 - **Strip**: One of three drawable parallel tracks (waveform, pitch, intensity) that scroll with the picture timeline
 - **Layer**: A group of three strips (waveform, pitch, intensity) that together define one synthesized sound
-- **Cue**: A placed sound event on a layer with defined start, hit, and end positions
-- **Hit**: The named important moment within a cue that must land on a chosen picture frame
-- **Identity**: A saved sound recipe (waveform shape, pitch and intensity curves) that can be reused across scenes with different timing
-- **Snapshot**: A saved version of a complete cue (identity plus placement and performance) for comparison
+- **Cue**: A placed sound event on a layer with its own copy of waveform, pitch and intensity curves (the performance), defined start, hit, and end frame positions, and level
+- **Hit**: The named important moment within a cue that must land on a chosen picture frame; the anchor point where pitch and intensity curves meet
+- **Identity**: A saved sound recipe consisting of the drawn waveform, recipe settings, and default pitch and intensity contours, stored with no scene timing
+- **Snapshot**: A saved version of a complete cue (curves, placement, and level) for comparison
 - **Project**: The saveable work containing the scene reference, identities, cues, and snapshots
 - **Playhead**: The fixed vertical line under which strips scroll during playback, showing the current timeline position
+- **Curve Anchor**: A frame position (start, hit, or end) that fixes part of a pitch or intensity curve to the timeline
 
 ## Requirements
 
@@ -33,6 +34,7 @@ The target user is an independent picture editor handling sound on horror or gen
 4. WHEN a video file is loaded, THE GhostReel SHALL require the user to confirm the frame rate as 24 fps before proceeding
 5. IF the selected file cannot be decoded or exceeds 60 seconds, THEN THE GhostReel SHALL display a descriptive error message and retain the previous scene
 6. WHEN the user navigates the timeline, THE GhostReel SHALL move the playhead position and scroll the strips to the corresponding time
+7. WHILE playing, THE strips SHALL scroll under the fixed playhead in step with the picture, and cue markers SHALL appear on both the strips and the picture timeline
 
 ### REQ-A2: Guided Introduction
 
@@ -52,11 +54,12 @@ The target user is an independent picture editor handling sound on horror or gen
 #### Acceptance Criteria
 
 1. THE GhostReel SHALL provide three editable strips per layer: waveform, pitch, and intensity
-2. WHEN the user draws on a waveform strip, THE GhostReel SHALL use that shape as the audio source for that layer
+2. WHEN the user draws on a waveform strip, THE GhostReel SHALL interpret that shape as a single-cycle repeating waveform for that layer's audio source
 3. WHEN the user draws on a pitch strip, THE GhostReel SHALL control the frequency of the waveform over time according to that curve
 4. WHEN the user draws on an intensity strip, THE GhostReel SHALL control the amplitude of the output over time according to that curve
-5. WHEN the user plays the scene, THE GhostReel SHALL synthesize audio from the drawn strips in real time
-6. THE GhostReel SHALL support editing existing points on the strips and undoing drawing actions
+5. WHEN a cue is placed, THE pitch and intensity curves SHALL be anchored at the cue's start, hit, and end frames
+6. WHEN the user plays the scene, THE GhostReel SHALL synthesize audio from the drawn strips in real time
+7. THE GhostReel SHALL support editing existing points on the strips and undoing drawing actions
 
 ### REQ-B2: Usable Starting Recipes
 
@@ -66,7 +69,7 @@ The target user is an independent picture editor handling sound on horror or gen
 
 1. THE GhostReel SHALL provide three named starter recipes: tension pulse, energy build and release, and stylized presence
 2. WHEN a recipe is selected, THE GhostReel SHALL populate the strips with waveform, pitch, and intensity curves that produce recognizable sound
-3. THE recipe curves SHALL use descriptive parameter ranges (for example, frequency in Hz) rather than raw synthesis values
+3. THE strips and controls SHALL carry plain-language text labels, and no state SHALL be shown by colour alone
 
 ### REQ-B3: Safe Audio Output
 
@@ -76,8 +79,10 @@ The target user is an independent picture editor handling sound on horror or gen
 
 1. THE GhostReel SHALL start with conservative initial gain that prevents clipping for the starter recipes
 2. THE GhostReel SHALL provide a visible stop control and a labeled volume control
-3. WHEN transitioning between cues or stopping playback, THE GhostReel SHALL apply fade envelopes that prevent audible clicks
-4. IF a drawn strip produces invalid parameter values, THEN THE GhostReel SHALL clamp or substitute safe values without producing unstable audio output
+3. WHEN stop is pressed, THE all audio SHALL cease, and repeated play and stop SHALL never leave audio running
+4. WHEN transitioning between cues or stopping playback, THE GhostReel SHALL apply fade envelopes that prevent audible clicks
+5. IF a drawn strip produces invalid parameter values, THEN THE GhostReel SHALL clamp or substitute safe values without producing unstable audio output
+6. IF a load or export fails, THEN THE GhostReel SHALL show a message and leave the project unchanged
 
 ### REQ-C1: Place Cues with Frame Precision
 
@@ -88,7 +93,7 @@ The target user is an independent picture editor handling sound on horror or gen
 1. THE GhostReel SHALL allow the user to place a cue start marker, a named hit marker, and an end marker on each layer's timeline
 2. WHEN a hit marker is placed, THE GhostReel SHALL record its position in frames relative to the scene start
 3. THE GhostReel SHALL display the hit position in both frames and samples (at 48 kHz, 2000 samples per frame at 24 fps)
-4. WHEN the cue plays, THE audible sound event SHALL align with the hit marker position within the scene timeline
+4. WHEN the cue plays or is exported, THE curve position at the hit anchor SHALL be rendered at sample (hit frame × 2000) in both playback and export
 5. THE GhostReel SHALL use a consistent time origin at the scene start (frame 0, time 0.0s, sample 0)
 
 ### REQ-C2: Independent Layer Control
@@ -110,8 +115,11 @@ The target user is an independent picture editor handling sound on horror or gen
 #### Acceptance Criteria
 
 1. WHEN the user adjusts a cue's start marker position, THE GhostReel SHALL move the start marker while keeping the hit marker at its original frame
-2. IF moving the start marker earlier would place it before the scene start, THEN THE GhostReel SHALL clamp the start marker at frame 0 and report the constraint
-3. WHEN the start marker is adjusted, THE GhostReel SHALL preserve the cue's waveform, pitch, intensity, end marker, and all settings on other layers
+2. WHEN the start marker is adjusted, THE GhostReel SHALL refit only the part of the pitch and intensity curves between start and hit, leaving the part between hit and end unchanged
+3. WHEN the user adjusts a cue's end marker position, THE GhostReel SHALL refit only the part of the pitch and intensity curves between hit and end, leaving the part between start and hit unchanged
+4. WHEN the user adjusts the hit marker position, THE GhostReel SHALL move the entire cue (start, hit, and end) together
+5. IF moving markers would place them outside the scene boundaries, THEN THE GhostReel SHALL clamp the markers at frame 0 or the scene end and report the constraint
+6. WHEN any marker is adjusted, THE GhostReel SHALL preserve the cue's waveform and all settings on other layers
 
 ### REQ-D1: Save and Reuse Sound Identities
 
@@ -119,11 +127,11 @@ The target user is an independent picture editor handling sound on horror or gen
 
 #### Acceptance Criteria
 
-1. THE GhostReel SHALL allow the user to save the current strips (waveform, pitch, intensity) as a named identity
-2. WHEN an identity is saved, THE GhostReel SHALL store the parameters needed to reproduce that sound design
+1. THE GhostReel SHALL allow the user to save the current waveform, recipe settings, and default pitch and intensity contours as a named identity
+2. THE identity SHALL be stored with no scene timing
 3. THE GhostReel SHALL provide an identity shelf that lists saved identities by name
-4. WHEN the user applies a saved identity to a layer, THE GhostReel SHALL load that identity's waveform, pitch, and intensity curves
-5. WHEN an identity is reused, THE GhostReel SHALL allow the user to place its cue with different start, hit, and end positions than the original
+4. WHEN the user applies a saved identity to a cue, THE GhostReel SHALL create the cue's own copy of the identity's waveform and fit the identity's default pitch and intensity contours to that cue's start, hit, and end frames
+5. WHEN a cue's pitch or intensity curves are edited after applying an identity, THE GhostReel SHALL modify only that cue's curves without changing the identity
 
 ### REQ-D2: Vary Performance Without Changing Identity
 
@@ -133,7 +141,7 @@ The target user is an independent picture editor handling sound on horror or gen
 
 1. THE GhostReel SHALL allow the user to copy an existing identity under a new name
 2. WHEN an identity is edited and saved again, THE GhostReel SHALL update only that identity
-3. WHEN an identity is edited, THE GhostReel SHALL not alter previously saved cue snapshots or other identities
+3. WHEN an identity is edited or re-saved, THE GhostReel SHALL not alter existing cues or snapshots until the user explicitly reapplies the identity
 
 ### REQ-D3: Project Scope for Identities and Scenes
 
@@ -176,11 +184,13 @@ The target user is an independent picture editor handling sound on horror or gen
 #### Acceptance Criteria
 
 1. THE GhostReel SHALL export a stereo audio file containing the mixed output of all unmuted layers
-2. THE exported file SHALL start at the scene's time origin (frame 0, sample 0)
-3. THE exported file SHALL have a duration equal to the scene duration plus any cue decay that fits within a defined range
-4. THE exported file SHALL use 48 kHz sample rate
-5. THE exported file format SHALL be PCM WAV
-6. WHEN a cue's end or decay extends beyond the scene duration, THE GhostReel SHALL render the decay if it fits within the maximum export range, or define and document the truncation behavior
+2. THE export SHALL use the same layers, mute states, levels and curves as playback
+3. THE exported file SHALL start at the scene's time origin (frame 0, sample 0)
+4. THE exported file SHALL have a duration exactly equal to the scene duration
+5. WHEN a cue is still sounding at the scene end, THE GhostReel SHALL apply a short fade to prevent clicks
+6. THE mixed output SHALL NOT clip; THE GhostReel SHALL maintain 6 dB of headroom below 0 dBFS
+7. THE exported file SHALL use 48 kHz sample rate, 24-bit PCM format, and two channels carrying the same signal
+8. THE exported file format SHALL be WAV
 
 ### REQ-G2: Verify Sync Inside GhostReel
 
@@ -189,10 +199,10 @@ The target user is an independent picture editor handling sound on horror or gen
 #### Acceptance Criteria
 
 1. THE GhostReel SHALL allow the user to load a previously exported WAV file as an audio track under the reference picture
-2. WHEN an exported file is loaded and played, THE GhostReel SHALL play it synchronized with the video
-3. THE GhostReel SHALL display the hit marker positions on the timeline
-4. THE GhostReel SHALL report each hit's position in frames and samples
-5. WHEN the user plays the imported audio, THE audible hit and the visual hit marker SHALL coincide
+2. WHEN an exported file is loaded for checking, THE live synthesis SHALL be muted
+3. WHEN the loaded file is played, THE GhostReel SHALL play it synchronized with the video
+4. THE GhostReel SHALL display the hit marker positions on the timeline
+5. THE GhostReel SHALL read the file's sample rate, channel count and duration, show them, and warn if they differ from the scene
 
 ### REQ-H1: Browser Deployment
 
@@ -234,24 +244,25 @@ The following capabilities are explicitly excluded from this MVP and must not be
 - Generated synthesis output is repeatable within the same browser session and rendering context, but not promised bit-identical across different browsers or versions.
 - Users will confirm the exported sync by importing the WAV into their editor at the scene start and checking the hit frame.
 - The three starter recipes will be tuned during implementation to produce recognizable, editable sounds.
-- Conservative gain and click prevention are sufficient for safe auditioning; no additional limiting or metering is provided.
+- Conservative gain, 6 dB headroom, and click prevention are sufficient for safe auditioning and export; no additional limiting or metering is provided.
 - Local video decode and synthesis for clips up to 60 seconds at 24 fps will perform acceptably on target hardware (current laptop, current Chrome).
+- The project supports two scenes with a shared identity shelf.
+- Waveforms are interpreted as single-cycle repeating waveforms.
+- Exported audio uses 24-bit PCM WAV, 48 kHz, with both channels carrying the same signal.
+
+## For Design
+
+- Strip visual resolution and edit density: determine the number of editable points per strip during implementation, and document any length-dependent limits discovered.
 
 ## Open Questions
 
-1. **Project structure for multiple scenes:** Should the project support two scenes with a shared identity shelf (preferred per brief), or should users duplicate a project file and replace the video reference? **Recommendation:** Implement two scenes per project if it does not complicate the data model; otherwise use project duplication and document the workflow.
-
-2. **Bit depth and channel behavior for WAV export:** What bit depth should be used (16-bit, 24-bit, 32-bit float), and how should stereo channels be populated (duplicate mono, true stereo, or configurable)? **Recommendation:** Use 16-bit PCM with duplicate mono (same signal on L and R) as the simplest starting point; document the choice.
-
-3. **Decay truncation at scene end:** When a cue's decay extends past the scene duration, should the export (a) truncate exactly at scene end, (b) extend to include decay up to a fixed maximum (e.g., +2 seconds), or (c) include the full decay regardless of length? **Recommendation:** Option (b) with a 2-second post-scene grace period, documented clearly.
-
-4. **Waveform drawing interpretation:** Should the drawn waveform be interpreted as (a) a single-cycle repeating waveform, (b) a wavetable with interpolation, or (c) direct sample data? **Recommendation:** Single-cycle repeating waveform (option a) as the simplest meaningful revival of the Oramics concept.
-
-5. **Strip visual resolution and edit density:** What is the minimum and maximum number of editable points per strip, and how does zoom or scene length affect editing precision? **Recommendation:** Start with a fixed reasonable resolution (e.g., 512 points per strip), test during implementation, and document any length-dependent limits discovered.
+1. **Snapshot comparison interface:** Should the comparison view show snapshots side-by-side, as an overlay, or as a toggle? **Recommendation:** Side-by-side comparison for clarity during implementation.
 
 ## Schedule Fit
 
-This scope fits the schedule in section 12 of the brief if implementation focuses on the audio engine and strip-to-picture lock first (21-22 Nov), then the interface and hit anchor (23-26 Nov), then save/reopen and deployment (27-29 Nov), leaving 30 Nov-1 Dec for polish and user sessions.
+This scope fits the schedule in section 12 of the brief if implementation focuses on the audio engine with single-cycle waveforms and strip-to-picture lock first (21-22 Nov), then the interface, curve anchoring, and hit anchor (23-26 Nov), then save/reopen and deployment (27-29 Nov), leaving 30 Nov-1 Dec for polish and user sessions.
+
+The curve anchoring model (REQ-C3) adds implementation complexity but eliminates the decay-truncation question and makes director revisions predictable.
 
 **If the schedule is too tight, cut in this order:**
 
