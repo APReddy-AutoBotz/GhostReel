@@ -20,16 +20,17 @@ GhostReel is a browser-based sound design application that revives Daphne Oram's
 - **Direct Manipulation:** Drawing changes immediately affect synthesized sound
 - **Frame Precision:** All timing expressed in frames with sample-accurate export
 - **Visual Lock:** Strips and picture timelines scroll together under a fixed playhead
-- **Predictable Revision:** Moving start/end refits curves while preserving hit position
 - **No Hidden State:** All sound parameters visible on strips and saveable
 
 ### Technology Stack
 
 - **React 18+** with TypeScript for UI components and state management
 - **Vite** for build tooling and development server
-- **Web Audio API** for synthesis, mixing, and offline rendering
+- **Pure function rendering** for synthesis (Web Audio-agnostic, testable in Node)
+- **Web Audio API** for playback only (AudioBufferSourceNode)
 - **HTML5 Video Element** for picture playback
 - **Canvas 2D** for drawable strips
+- **Web Workers** for debounced re-rendering after edits
 - **No server-side processing:** all work happens in the browser
 
 ## Architecture
@@ -42,26 +43,35 @@ GhostReel is a browser-based sound design application that revives Daphne Oram's
 │  - Project state management                              │
 │  - File I/O (open video, save/load project, export WAV) │
 │  - Global controls (play/stop, volume, undo/redo)       │
+│  - Render coordinator (debounced, Web Worker)           │
 └────────────┬────────────────────────────────────────────┘
              │
     ┌────────┴────────┐
     │                 │
 ┌───▼──────────┐  ┌──▼─────────────────────────────────┐
-│ Video        │  │ Audio Engine                       │
-│ Component    │  │ - Synthesis                        │
-│              │  │ - Mixing                           │
-│ - Playback   │  │ - Offline rendering                │
-│ - Scrubbing  │  │ - Real-time playback               │
-│ - Timeline   │  │                                    │
+│ Video        │  │ Pure Renderer (Web Audio-agnostic) │
+│ Component    │  │ renderScene(scene) -> Float32Array │
+│              │  │ - Wavetable synthesis              │
+│ - Playback   │  │ - Per-sample evaluation            │
+│ - Scrubbing  │  │ - Mixing                           │
+│ - Timeline   │  │ - No DOM, testable in Node         │
 └───┬──────────┘  └──┬─────────────────────────────────┘
     │                │
+    │                │ (rendered buffer)
     │                │
 ┌───▼────────────────▼─────────────────────────────────┐
+│              Playback Engine                         │
+│  - AudioBufferSourceNode at video offset             │
+│  - Drift detection and resync                        │
+│  - Volume control                                    │
+└──────────────────────────────────────────────────────┘
+    │
+┌───▼──────────────────────────────────────────────────┐
 │              Strip Editor Canvas                     │
 │  - Three strips per layer (waveform, pitch, intensity)│
 │  - Marker placement (start, hit, end)                │
 │  - Drawing interaction                               │
-│  - Visual timeline sync                              │
+│  - rAF-driven scroll sync                            │
 └──────────────────────────────────────────────────────┘
     │
 ┌───▼──────────────────────────────────────────────────┐
@@ -74,72 +84,28 @@ GhostReel is a browser-based sound design application that revives Daphne Oram's
 
 ### Component Responsibilities
 
-#### Application Shell
-- Maintains the global project state
-- Coordinates playback between video and audio
-- Handles file operations (video open, project save/load, WAV export)
-- Manages undo/redo stack
-- Provides transport controls and volume
+**Application Shell:** Global project state, playback coordination, file operations, undo/redo, transport controls, volume, triggers re-render after edits (debounced).
 
-#### Video Component
-- Wraps HTML5 video element
-- Exposes current playback time and frame position
-- Responds to play/pause/seek commands
-- Emits timeupdate events for strip synchronization
-- Reports video duration and dimensions
+**Video Component:** HTML5 video element wrapper, exposes playback time and frame position, responds to play/pause/seek, emits frame updates via requestAnimationFrame.
 
-#### Audio Engine
-- **Synthesizer:** Generates audio from waveform, pitch, and intensity curves
-- **Mixer:** Combines multiple layers with level controls
-- **Real-time Renderer:** Connects to Web Audio destination for playback
-- **Offline Renderer:** Produces WAV export using OfflineAudioContext
-- **Safety:** Enforces gain limits, applies fade envelopes, prevents clicks
+**Pure Renderer:** `renderScene(scene, sampleRate) -> RenderResult`. Wavetable synthesis, per-sample curve evaluation, mixing, peak limiting. No Web Audio dependency, testable in Node.
 
-#### Strip Editor Canvas
-- Renders three strips per layer (waveform, pitch, intensity)
-- Handles mouse/touch drawing interactions
-- Displays cue markers (start, hit, end) on strips and timeline
-- Scrolls strips in sync with video playback
-- Supports selection, editing, and undo of drawn points
+**Playback Engine:** Connects rendered buffer to Web Audio via AudioBufferSourceNode, starts at offset matching video.currentTime, detects and fixes audio/video drift (>40ms), applies volume.
 
-#### Identity & Snapshot Manager
-- Maintains identity shelf (saved sound recipes)
-- Creates, updates, and deletes identities
-- Applies identities to cues (copies data, fits curves to cue duration)
-- Saves and loads cue snapshots for A/B comparison
-- Provides three starter recipes (tension pulse, energy build, stylized presence)
+**Strip Editor Canvas:** Renders three strips per layer, handles drawing interactions, displays cue markers on strips and timeline, scrolls in sync with video via requestAnimationFrame (60 fps target). Waveform strip tiles single-cycle waveform; editing any tile edits the cycle.
+
+**Identity & Snapshot Manager:** Maintains identity shelf, creates/updates/deletes identities, applies identities to cues (copies data, fits curves to cue duration), saves/loads snapshots for A/B comparison, provides three starter recipes, handles missing identities gracefully (identityId is provenance only).
 
 ### State Management Strategy
 
-Use React Context + useReducer for global state, structured as:
+Use React Context + useReducer for global state:
 
-```typescript
-interface AppState {
-  project: Project;
-  playback: PlaybackState;
-  ui: UIState;
-  undoStack: ProjectSnapshot[];
-  redoStack: ProjectSnapshot[];
-}
+- **project:** Project (identities, scenes, active scene index)
+- **playback:** isPlaying, currentFrame, volume, mode ('synthesis' | 'verifyExport'), optional exportedAudioBuffer
+- **ui:** selectedLayer (0-2), selectedStrip, comparisonActive, tourDismissed, creditNoteDismissed, activeSceneIndex
+- **undoStack/redoStack:** ProjectSnapshot arrays (max 50 entries)
 
-interface PlaybackState {
-  isPlaying: boolean;
-  currentFrame: number;
-  volume: number; // 0.0 to 1.0
-  mode: 'synthesis' | 'verifyExport';
-  exportedAudioBuffer?: AudioBuffer;
-}
-
-interface UIState {
-  selectedLayer: number; // 0, 1, 2
-  selectedStrip: 'waveform' | 'pitch' | 'intensity' | null;
-  comparisonActive: boolean;
-  tourDismissed: boolean;
-  creditNoteDismissed: boolean;
-}
-```
-
-Local component state for transient interactions (mouse position, hover state, drag in progress).
+Local component state for transient interactions (mouse position, hover, drag).
 
 ## Components and Interfaces
 
@@ -177,13 +143,14 @@ interface Layer {
 
 // Cue is a placed sound performance
 interface Cue {
-  identityId: string; // references Identity
+  identityId: string; // provenance only
   startFrame: number;
   hitFrame: number;
   endFrame: number;
   waveform: Curve; // single-cycle waveform shape
   pitch: Curve; // frequency over time
   intensity: Curve; // amplitude envelope over time
+  recipeSettings: RecipeSettings; // read by renderer
 }
 
 // Identity is a reusable sound recipe (no timing)
@@ -198,7 +165,6 @@ interface Identity {
 
 // RecipeSettings capture synthesis parameters
 interface RecipeSettings {
-  baseFrequency: number; // Hz, default pitch anchor
   frequencyRange: [number, number]; // Hz, min/max for pitch curve
   gainRange: [number, number]; // linear multiplier for intensity curve
 }
@@ -206,647 +172,372 @@ interface RecipeSettings {
 // Curve is a drawable, editable path
 interface Curve {
   points: Point[];
-  interpolation: 'linear' | 'cubic'; // linear for MVP
+  interpolation: 'linear'; // only linear in MVP
 }
 
 interface Point {
-  x: number; // normalized 0-1 (relative to curve domain)
-  y: number; // normalized 0-1 (relative to curve range)
+  x: number; // waveform: phase 0-1 (0° to 360°); pitch/intensity: normalized time 0-1 (0=start, 0.5=hit, 1=end)
+  y: number; // waveform: -1 to 1 (bipolar), pitch/intensity: 0 to 1
 }
 ```
 
-### Curve Anchoring Model
+### Curve-to-Time Mapping
 
-Cues have three anchor frames: start, hit, and end. Pitch and intensity curves are divided into two segments:
+Waveform curves represent a single cycle using phase (x = 0 to 1 = 0° to 360°) and have NO timing meaning. Only pitch and intensity curves map to scene time.
 
-1. **Pre-hit segment:** start frame to hit frame
-2. **Post-hit segment:** hit frame to end frame
+Pitch and intensity cues have three anchor frames: start, hit, and end. These curves use normalized x coordinates where:
 
-When markers move:
+- **x = 0.0** corresponds to the **start frame**
+- **x = 0.5** corresponds to the **hit frame**
+- **x = 1.0** corresponds to the **end frame**
 
-- **Move start marker:** Refit pre-hit segment to new duration, post-hit segment unchanged
-- **Move end marker:** Refit post-hit segment to new duration, pre-hit segment unchanged
-- **Move hit marker:** Move entire cue (all three markers), preserving both segment durations
-- **Waveform:** Always copied unchanged from identity; no anchoring
-
-**Implementation:** Store curves as normalized (0-1 domain), anchor at 0.0 (start), 0.5 (hit), 1.0 (end). When refitting, map only the affected half of the curve to the new frame range.
+The mapping from curve x to sample position is **piecewise linear**:
 
 ```typescript
-interface CurveSegments {
-  preHit: Point[]; // x in [0, 0.5]
-  postHit: Point[]; // x in [0.5, 1.0]
-}
-
-function splitCurveAtHit(curve: Curve): CurveSegments {
-  const preHit = curve.points.filter(p => p.x <= 0.5);
-  const postHit = curve.points.filter(p => p.x >= 0.5);
-  return { preHit, postHit };
-}
-
-function refitPreHit(
-  original: CurveSegments,
-  newStartFrame: number,
-  hitFrame: number,
-  endFrame: number
-): Curve {
-  // Refit pre-hit segment to [newStartFrame, hitFrame]
-  // Keep post-hit segment unchanged on [hitFrame, endFrame]
-  // Return merged curve
-}
-```
-
-### Audio Engine Interface
-
-```typescript
-interface AudioEngine {
-  // Real-time synthesis
-  startPlayback(scene: Scene, startFrame: number): void;
-  stopPlayback(): void;
-  setVolume(volume: number): void;
+function curveXToSample(x: number, cue: Cue): number {
+  const startSample = frameToSample(cue.startFrame);
+  const hitSample = frameToSample(cue.hitFrame);
+  const endSample = frameToSample(cue.endFrame);
   
-  // Offline rendering
-  renderToBuffer(scene: Scene): Promise<AudioBuffer>;
-  
-  // Cleanup
-  dispose(): void;
-}
-
-class WebAudioEngine implements AudioEngine {
-  private context: AudioContext;
-  private offlineContext?: OfflineAudioContext;
-  private sources: AudioBufferSourceNode[];
-  private gainNode: GainNode;
-  private limiter: DynamicsCompressorNode;
-  
-  // ... implementation
-}
-```
-
-### Synthesizer Design
-
-**Waveform Interpretation:**
-
-- User draws a single-cycle waveform on a canvas (e.g., 512 pixels wide)
-- Sample this curve at a fixed resolution (e.g., 2048 samples) to create a PeriodicWave
-- Use `AudioContext.createPeriodicWave()` with real/imaginary coefficients derived from the drawn shape
-- This creates a repeating waveform with controlled harmonic content
-
-**Alternative (simpler for MVP):** Store the drawn waveform as a single-cycle AudioBuffer and use looped AudioBufferSourceNode.
-
-```typescript
-function createWaveformBuffer(
-  curve: Curve, 
-  sampleRate: number
-): AudioBuffer {
-  const cycleLength = 2048; // samples per cycle
-  const buffer = new AudioBuffer({
-    length: cycleLength,
-    sampleRate: sampleRate,
-    numberOfChannels: 1
-  });
-  
-  const channel = buffer.getChannelData(0);
-  for (let i = 0; i < cycleLength; i++) {
-    const x = i / cycleLength; // 0 to 1
-    channel[i] = evaluateCurve(curve, x);
+  if (x <= 0.5) {
+    // Pre-hit: map [0, 0.5] to [startSample, hitSample]
+    const t = x / 0.5; // 0 to 1
+    return startSample + t * (hitSample - startSample);
+  } else {
+    // Post-hit: map [0.5, 1] to [hitSample, endSample]
+    const t = (x - 0.5) / 0.5; // 0 to 1
+    return hitSample + t * (endSample - hitSample);
   }
-  
-  return buffer;
 }
-```
 
-**Pitch Control:**
-
-- Pitch curve maps to `AudioBufferSourceNode.playbackRate`
-- Curve's y-axis maps to frequency range defined in RecipeSettings
-- Sample pitch curve at the cue's frame rate, apply values via `setValueAtTime()`
-
-```typescript
-function applyPitchCurve(
-  source: AudioBufferSourceNode,
-  pitchCurve: Curve,
-  recipeSettings: RecipeSettings,
-  startTime: number,
-  durationFrames: number,
-  frameRate: number
-): void {
-  const [minFreq, maxFreq] = recipeSettings.frequencyRange;
-  const frameDuration = 1 / frameRate;
+function sampleToCurveX(sample: number, cue: Cue): number {
+  const startSample = frameToSample(cue.startFrame);
+  const hitSample = frameToSample(cue.hitFrame);
+  const endSample = frameToSample(cue.endFrame);
   
-  for (let frame = 0; frame < durationFrames; frame++) {
-    const t = startTime + (frame * frameDuration);
-    const x = frame / durationFrames; // 0 to 1
-    const y = evaluateCurve(pitchCurve, x); // 0 to 1
-    const freq = minFreq + y * (maxFreq - minFreq);
-    
-    // playbackRate relative to base frequency embedded in waveform
-    const baseFreq = recipeSettings.baseFrequency;
-    const rate = freq / baseFreq;
-    
-    source.playbackRate.setValueAtTime(rate, t);
+  if (sample <= hitSample) {
+    const t = (sample - startSample) / (hitSample - startSample);
+    return t * 0.5;
+  } else {
+    const t = (sample - hitSample) / (endSample - hitSample);
+    return 0.5 + t * 0.5;
   }
 }
 ```
 
-**Intensity Control:**
+**Key properties:**
 
-- Intensity curve maps to `GainNode.gain`
-- Apply fade-in (5ms) and fade-out (20ms) envelopes to prevent clicks
-- Sample intensity curve at frame rate
+1. **x = 0.5 always maps to hit sample:** `curveXToSample(0.5, cue) === frameToSample(cue.hitFrame)`
+2. **Monotonic:** Increasing x always maps to increasing sample position
+3. **No curve point changes when markers move:** Moving start or end changes only the time mapping, not the curve points themselves
+4. **Cue validity:** startFrame < hitFrame < endFrame with at least one frame on each side (enforced when markers move and when project loads; prevents divide-by-zero)
 
-**Click Prevention:**
+This mapping is used for both rendering (evaluating curves at sample positions) and drawing (displaying curves aligned to the timeline).
+
+**Marker movement implications:**
+
+- **Move start:** Changes pre-hit time span; curve points unchanged
+- **Move end:** Changes post-hit time span; curve points unchanged  
+- **Move hit:** Moves all three markers together; preserves (hit - start) and (end - hit) durations
+
+### Audio Rendering
+
+**Core Signature:**
 
 ```typescript
-function applyIntensityCurve(
-  gainNode: GainNode,
-  intensityCurve: Curve,
-  recipeSettings: RecipeSettings,
-  startTime: number,
-  durationFrames: number,
-  frameRate: number
-): void {
-  const [minGain, maxGain] = recipeSettings.gainRange;
-  const frameDuration = 1 / frameRate;
-  const fadeInTime = 0.005; // 5ms
-  const fadeOutTime = 0.020; // 20ms
-  
-  gainNode.gain.setValueAtTime(0, startTime);
-  gainNode.gain.linearRampToValueAtTime(
-    evaluateIntensityAt(intensityCurve, 0, minGain, maxGain),
-    startTime + fadeInTime
-  );
-  
-  for (let frame = 0; frame < durationFrames; frame++) {
-    const t = startTime + (frame * frameDuration);
-    const x = frame / durationFrames;
-    const y = evaluateCurve(intensityCurve, x);
-    const gain = minGain + y * (maxGain - minGain);
-    
-    gainNode.gain.setValueAtTime(gain, t);
-  }
-  
-  const endTime = startTime + (durationFrames * frameDuration);
-  gainNode.gain.setValueAtTime(
-    evaluateIntensityAt(intensityCurve, 1.0, minGain, maxGain),
-    endTime - fadeOutTime
-  );
-  gainNode.gain.linearRampToValueAtTime(0, endTime);
+function renderScene(scene: Scene, sampleRate: number = 48000): RenderResult
+
+interface RenderResult {
+  samples: Float32Array; // mono output
+  reductionDb: number; // 0 if no limiting applied, negative if peak was reduced
 }
 ```
 
-**Mixing:**
+Produces mono output (single channel). Preview and export both use this same buffer. The function is Web Audio-agnostic so it can run in Node tests with fast-check.
+
+**Wavetable Preparation:**
+
+Each cue's waveform curve (bipolar, -1 to 1) becomes a 2048-sample lookup table:
 
 ```typescript
-function mixLayers(scene: Scene, context: BaseAudioContext, startTime: number): void {
-  const masterGain = context.createGain();
-  const limiter = context.createDynamicsCompressor();
+function prepareWavetable(curve: Curve): Float32Array {
+  const table = new Float32Array(2048);
+  for (let i = 0; i < 2048; i++) {
+    table[i] = evaluateCurve(curve, i / 2048); // bipolar -1 to 1
+  }
   
-  // Configure limiter to enforce -6 dBFS ceiling
-  limiter.threshold.setValueAtTime(-6, startTime);
-  limiter.knee.setValueAtTime(0, startTime);
-  limiter.ratio.setValueAtTime(20, startTime);
-  limiter.attack.setValueAtTime(0.001, startTime);
-  limiter.release.setValueAtTime(0.01, startTime);
+  // Remove DC offset
+  const mean = table.reduce((sum, v) => sum + v, 0) / 2048;
+  for (let i = 0; i < 2048; i++) table[i] -= mean;
   
-  masterGain.connect(limiter);
-  limiter.connect(context.destination);
+  // Normalize peak to ±1
+  let peak = 0;
+  for (let i = 0; i < 2048; i++) {
+    const abs = Math.abs(table[i]);
+    if (abs > peak) peak = abs;
+  }
+  if (peak > 0) {
+    for (let i = 0; i < 2048; i++) table[i] /= peak;
+  }
+  
+  return table;
+}
+```
+
+**Phase Accumulator Synthesis:**
+
+```typescript
+function renderCue(cue: Cue, sampleRate: number, output: Float32Array, layerLevel: number): void {
+  const wavetable = prepareWavetable(cue.waveform);
+  let phase = 0.0; // 0 to 2048
+  
+  const startSample = frameToSample(cue.startFrame);
+  const endSample = frameToSample(cue.endFrame);
+  const fadeInSamples = Math.floor(0.005 * sampleRate); // 5ms
+  const fadeOutSamples = Math.floor(0.020 * sampleRate); // 20ms
+  
+  for (let sample = startSample; sample < endSample; sample++) {
+    const x = sampleToCurveX(sample, cue);
+    
+    // Evaluate curves -> Hz and linear gain
+    const pitchY = clamp(evaluateCurve(cue.pitch, x), 0, 1);
+    const [minFreq, maxFreq] = cue.recipeSettings.frequencyRange;
+    const freq = minFreq + pitchY * (maxFreq - minFreq);
+    
+    const intensityY = clamp(evaluateCurve(cue.intensity, x), 0, 1);
+    const [minGain, maxGain] = cue.recipeSettings.gainRange;
+    let gain = minGain + intensityY * (maxGain - minGain);
+    
+    // Apply cue-boundary fades
+    const offset = sample - startSample;
+    if (offset < fadeInSamples) gain *= offset / fadeInSamples;
+    const remaining = endSample - sample;
+    if (remaining < fadeOutSamples) gain *= remaining / fadeOutSamples;
+    
+    // Read wavetable with linear interpolation
+    const index = phase % 2048;
+    const i0 = Math.floor(index);
+    const i1 = (i0 + 1) % 2048;
+    const frac = index - i0;
+    const waveSample = wavetable[i0] * (1 - frac) + wavetable[i1] * frac;
+    
+    // Mix into output
+    output[sample] += waveSample * gain * layerLevel;
+    
+    // Advance phase
+    phase += (freq * 2048) / sampleRate;
+  }
+}
+```
+
+**Mixing and Peak Limiting:**
+
+```typescript
+function renderScene(scene: Scene, sampleRate: number = 48000): RenderResult {
+  const output = new Float32Array(frameToSample(scene.durationFrames));
   
   for (const layer of scene.layers) {
     if (layer.cue && !layer.muted) {
-      const layerGain = context.createGain();
-      layerGain.gain.setValueAtTime(layer.level, startTime);
-      
-      synthesizeCue(layer.cue, context, startTime, layerGain);
-      layerGain.connect(masterGain);
+      renderCue(layer.cue, sampleRate, output, layer.level);
     }
   }
-}
-```
-
-### Peak Limiting Strategy (addresses REQ-G1.6)
-
-Use a DynamicsCompressorNode configured as a brick-wall limiter:
-
-- **Threshold:** -6 dB
-- **Ratio:** 20:1 (effectively infinite)
-- **Knee:** 0 dB (hard knee)
-- **Attack:** 1 ms
-- **Release:** 10 ms
-
-This guarantees exported audio never exceeds -6 dBFS peak while preserving transient detail within the threshold.
-
-**Verification:** After offline rendering, scan the output buffer to confirm peak level:
-
-```typescript
-function verifyPeakLevel(buffer: AudioBuffer): number {
+  
+  // Scene-end fade (last 20ms)
+  const sceneEndFade = Math.floor(0.020 * sampleRate);
+  for (let i = Math.max(0, output.length - sceneEndFade); i < output.length; i++) {
+    output[i] *= (output.length - i) / sceneEndFade;
+  }
+  
+  // Peak limiting: measure with loop (not Math.max spread), normalize if needed
   let peak = 0;
-  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-    const samples = buffer.getChannelData(ch);
-    for (let i = 0; i < samples.length; i++) {
-      peak = Math.max(peak, Math.abs(samples[i]));
-    }
+  for (let i = 0; i < output.length; i++) {
+    const abs = Math.abs(output[i]);
+    if (abs > peak) peak = abs;
   }
-  return 20 * Math.log10(peak); // dBFS
+  
+  let reductionDb = 0;
+  if (peak > 0.5) {
+    const factor = 0.5 / peak;
+    for (let i = 0; i < output.length; i++) output[i] *= factor;
+    reductionDb = 20 * Math.log10(factor);
+  }
+  
+  return { samples: output, reductionDb };
 }
 ```
+
+**Band-Limiting:**
+
+Strategy: Compute the cycle's harmonics once from the 2048-sample waveform table. Build one band-limited table per octave, keeping only harmonics below Nyquist for that octave's top frequency. Select the table based on current frequency during phase accumulation.
+
+- **Supported frequency range:** 20 Hz to 2 kHz (clamp outside this range)
+- **Fallback:** If pure band-limiting proves infeasible, use `OfflineAudioContext(1, frames * 2000, 48000)` with `OscillatorNode` and `PeriodicWave` behind the same signature
 
 ## Data Models
 
-### Project File Format (JSON)
+### Project File Format
 
-```json
-{
-  "version": "1.0",
-  "identityShelf": [
-    {
-      "id": "uuid-1",
-      "name": "Tension Pulse",
-      "waveform": {
-        "points": [{"x": 0, "y": 0}, {"x": 0.5, "y": 1}, {"x": 1, "y": 0}],
-        "interpolation": "linear"
-      },
-      "defaultPitch": {
-        "points": [{"x": 0, "y": 0.3}, {"x": 0.5, "y": 0.5}, {"x": 1, "y": 0.3}],
-        "interpolation": "linear"
-      },
-      "defaultIntensity": {
-        "points": [{"x": 0, "y": 0}, {"x": 0.5, "y": 1}, {"x": 1, "y": 0}],
-        "interpolation": "linear"
-      },
-      "recipeSettings": {
-        "baseFrequency": 110,
-        "frequencyRange": [80, 440],
-        "gainRange": [0, 0.5]
-      }
-    }
-  ],
-  "scenes": [
-    {
-      "videoSource": {
-        "type": "bundled",
-        "name": "corridor_approach"
-      },
-      "frameRate": 24,
-      "durationFrames": 240,
-      "layers": [
-        {
-          "cue": {
-            "identityId": "uuid-1",
-            "startFrame": 60,
-            "hitFrame": 120,
-            "endFrame": 180,
-            "waveform": { /* copied from identity */ },
-            "pitch": { /* fitted to 60 frames */ },
-            "intensity": { /* fitted to 60 frames */ }
-          },
-          "level": 0.8,
-          "muted": false,
-          "snapshot": null
-        },
-        {
-          "cue": null,
-          "level": 1.0,
-          "muted": false,
-          "snapshot": null
-        },
-        {
-          "cue": null,
-          "level": 1.0,
-          "muted": false,
-          "snapshot": null
-        }
-      ]
-    }
-  ],
-  "activeSceneIndex": 0
-}
-```
-
-**Serialization:**
-- Save: `JSON.stringify(project, null, 2)`, trigger download via Blob URL
-- Load: `JSON.parse()`, validate version and structure, reconstruct state
-
-**Validation on Load:**
-- Check `version === '1.0'`
-- Verify all referenced identity IDs exist
-- Clamp frame numbers to scene duration
-- Substitute safe defaults for invalid curve data
-
-### WAV File Format (PCM Export)
-
-**Format:**
-- **Sample Rate:** 48000 Hz
-- **Bit Depth:** 24-bit PCM (little-endian)
-- **Channels:** 2 (stereo, both carrying same signal)
-- **Duration:** Exactly scene duration in frames
-- **Start:** Sample 0 = frame 0 = time 0.0
-
-**Encoding:**
+Projects are saved as JSON files. Key structure:
 
 ```typescript
-function encodeWAV(buffer: AudioBuffer): ArrayBuffer {
-  const numChannels = 2;
-  const sampleRate = 48000;
-  const bitsPerSample = 24;
-  const bytesPerSample = bitsPerSample / 8;
-  const numFrames = buffer.length;
-  
-  const dataSize = numFrames * numChannels * bytesPerSample;
-  const headerSize = 44;
-  const fileSize = headerSize + dataSize;
-  
-  const arrayBuffer = new ArrayBuffer(fileSize);
-  const view = new DataView(arrayBuffer);
-  
-  // RIFF header
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, fileSize - 8, true);
-  writeString(view, 8, 'WAVE');
-  
-  // fmt chunk
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // fmt chunk size
-  view.setUint16(20, 1, true); // PCM format
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true); // byte rate
-  view.setUint16(32, numChannels * bytesPerSample, true); // block align
-  view.setUint16(34, bitsPerSample, true);
-  
-  // data chunk
-  writeString(view, 36, 'data');
-  view.setUint32(40, dataSize, true);
-  
-  // Interleave samples
-  const monoData = buffer.getChannelData(0);
-  let offset = 44;
-  
-  for (let i = 0; i < numFrames; i++) {
-    const sample = Math.max(-1, Math.min(1, monoData[i]));
-    const intSample = Math.round(sample * 0x7FFFFF);
-    
-    // Write left channel (24-bit little-endian)
-    view.setUint8(offset++, (intSample) & 0xFF);
-    view.setUint8(offset++, (intSample >> 8) & 0xFF);
-    view.setUint8(offset++, (intSample >> 16) & 0xFF);
-    
-    // Write right channel (same as left)
-    view.setUint8(offset++, (intSample) & 0xFF);
-    view.setUint8(offset++, (intSample >> 8) & 0xFF);
-    view.setUint8(offset++, (intSample >> 16) & 0xFF);
-  }
-  
-  return arrayBuffer;
+interface Project {
+  version: '1.0';
+  identityShelf: Identity[];
+  scenes: Scene[]; // max 2
+  activeSceneIndex: number;
 }
 ```
 
-### Timeline Mapping
+**Validation on Load:**
+
+1. Check `version === '1.0'`
+2. **Do not fail if an identity ID is missing** — `identityId` is provenance only. If a cue references a deleted identity, allow the project to load; the cue retains its own curves.
+3. Clamp frame numbers to scene duration
+4. Clamp curve point x and y values to valid ranges (x: 0-1, waveform y: -1 to 1, pitch/intensity y: 0-1)
+5. Substitute safe defaults for missing or invalid fields
+
+**Scene Switching:**
+
+The UI provides controls to switch `activeSceneIndex` between the two scenes. Both scenes share the same identity shelf. When switching scenes, re-render the new scene's audio.
+
+### WAV Export Format
+
+- **Sample Rate:** 48000 Hz
+- **Bit Depth:** 24-bit PCM (little-endian)
+- **Channels:** 2 (stereo, both carrying same mono signal)
+- **Duration:** Exactly scene duration in frames
+- **Origin:** Sample 0 = frame 0
+
+Export flow: `renderScene` → WAV encoding → download Blob.
+
+### Export Verification (REQ-G2)
+
+User can load a previously exported WAV to verify sync:
+
+1. Parse WAV header directly to extract sample rate, channel count, and duration (no audio decoding yet)
+2. Display these values and warn if they differ from expected (48000 Hz, 2 channels, scene duration)
+3. Decode the WAV file using Web Audio `decodeAudioData`
+4. Play the decoded buffer through an `AudioBufferSourceNode`, synchronized to video
+5. Mute the live rendered mix while playing the exported file
+6. Display hit marker positions on the timeline for visual verification
+
+### Timeline Mapping and Rounding
 
 **Fundamental Conversion:**
 
 At 24 fps and 48 kHz:
-- 1 frame = 1/24 second = 0.041667 seconds
+- 1 frame = 1/24 second ≈ 0.041667 seconds
 - 1 frame = 2000 samples
 
-**Frame to Sample:**
 ```typescript
 function frameToSample(frame: number): number {
   return frame * 2000;
 }
-```
 
-**Sample to Frame:**
-```typescript
 function sampleToFrame(sample: number): number {
   return Math.floor(sample / 2000);
 }
-```
 
-**Frame to Time:**
-```typescript
 function frameToTime(frame: number): number {
-  return frame / 24.0;
+  return frame / 24.0; // start of frame
 }
-```
 
-**Time to Frame:**
-```typescript
+function frameSeekTime(frame: number): number {
+  return (frame + 0.5) / 24.0; // middle of frame, for video seeks only
+}
+
 function timeToFrame(time: number): number {
-  return Math.floor(time * 24.0);
+  return Math.floor(time * 24.0 + 1e-6); // epsilon for float precision
 }
 ```
 
-**Hit Position Display:**
+**Rounding rule:** Video seeks target the middle of a frame using `frameSeekTime(n)`. This centers the displayed image within the frame interval and reduces seek error.
+
+**Display:**
+
 ```typescript
 function formatHitPosition(hitFrame: number): string {
-  const sample = frameToSample(hitFrame);
-  return `Frame ${hitFrame} (Sample ${sample})`;
+  return `Frame ${hitFrame} (Sample ${frameToSample(hitFrame)})`;
 }
 ```
 
-**Scene Duration:**
-```typescript
-function calculateSceneDuration(durationFrames: number): {
-  frames: number;
-  seconds: number;
-  samples: number;
-} {
-  return {
-    frames: durationFrames,
-    seconds: durationFrames / 24.0,
-    samples: frameToSample(durationFrames)
-  };
-}
-```
+### Playback and Synchronization
 
-### Visual Timeline Synchronization
+**Strip Scrolling:**
 
-**Challenge:** HTML5 video `currentTime` has limited precision (~15ms typical). Seeking may not land exactly on requested frame.
-
-**Approach:**
-
-1. **Playback:** Use video `timeupdate` event (fires ~4x per second) to update strip scroll position. Accept minor jitter; strips follow video, not the other way around.
-
-2. **Scrubbing:** When user drags timeline scrubber, update both video `currentTime` and strip scroll immediately. Video will seek to nearest keyframe; strips show requested position.
-
-3. **Marker Placement:** User clicks on strip or timeline; snap to nearest frame boundary. Store frame number, display at exact pixel position.
-
-**Strip Scroll Calculation:**
+Drive from `requestAnimationFrame` reading `video.currentTime` every frame (60 fps target).
 
 ```typescript
-interface StripViewport {
-  widthPixels: number; // canvas width
-  visibleDuration: number; // seconds visible in viewport
-  scrollPosition: number; // seconds, left edge of viewport
-}
-
-function updateStripScroll(
-  currentFrame: number,
-  viewport: StripViewport
-): number {
-  const currentTime = frameToTime(currentFrame);
-  const centerTime = currentTime;
-  const newScrollPosition = centerTime - (viewport.visibleDuration / 2);
-  
-  return Math.max(0, newScrollPosition);
-}
-
-function drawStrip(
-  curve: Curve,
-  viewport: StripViewport,
-  canvas: HTMLCanvasElement
-): void {
-  const ctx = canvas.getContext('2d');
-  const startTime = viewport.scrollPosition;
-  const endTime = startTime + viewport.visibleDuration;
-  
-  // Map curve's normalized x (0-1) to visible time range
-  // Draw only points within viewport
-  // ...
+function syncStripScroll(video: HTMLVideoElement) {
+  requestAnimationFrame(() => {
+    updateStripPosition(video.currentTime);
+    syncStripScroll(video); // loop
+  });
 }
 ```
 
-**Limitation Disclosure:**
+**Audio Playback:**
 
-The design acknowledges browser video seek is not frame-accurate. We provide frame-accurate *export* and *marker placement*, but not frame-accurate *playback preview*. This is acceptable for scene-by-scene work where final sync is verified via export.
+- Start an `AudioBufferSourceNode` at the buffer offset matching `video.currentTime`
+- Check drift every 100ms: if `|video.currentTime - audioTime| > 0.040`, stop and restart audio
+- Apply user volume via a `GainNode`
+
+**Live Render Updates:**
+
+Preview re-renders after every edit. To meet the under-250ms budget for 60-second scenes:
+
+1. **Cache one rendered buffer per layer** (only audio data, not full scene mix)
+2. **Re-render only the edited layer** when curves or markers change
+3. **Mix all layers and apply peak ceiling** to produce final buffer
+4. **Debounce during pointer drag:** re-render on pointer-up only
+5. **If playing:** swap to new buffer at current offset with 10ms crossfade
+6. **Curve evaluation optimization:** maintain forward-moving segment index instead of searching per sample
+
+**Waveform Strip Drawing:**
+
+The waveform strip shows the single-cycle waveform tiled across the cue's time span. Editing any tile edits the underlying cycle (all tiles update). Draw by repeating the cycle at a fixed visual frequency (e.g., every 50 pixels).
 
 ## Error Handling
 
 ### Audio Safety
 
-**Stop Within 100ms (REQ-B3.3):**
-
-```typescript
-class AudioEngine {
-  private activeNodes: AudioNode[] = [];
-  
-  stopPlayback(): void {
-    const now = this.context.currentTime;
-    const stopTime = now + 0.01; // 10ms ramp down
-    
-    this.activeNodes.forEach(node => {
-      if ('stop' in node) {
-        (node as AudioScheduledSourceNode).stop(stopTime);
-      }
-    });
-    
-    this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-    this.gainNode.gain.linearRampToValueAtTime(0, stopTime);
-    
-    // Clear references after stop time
-    setTimeout(() => {
-      this.activeNodes = [];
-    }, 100);
-  }
-}
-```
+Stop ramps the single playback GainNode to zero over 10 ms and stops the one AudioBufferSourceNode.
 
 **Invalid Parameter Handling:**
 
-```typescript
-function sanitizeGain(value: number): number {
-  if (!isFinite(value) || isNaN(value)) return 0;
-  return Math.max(0, Math.min(1, value));
-}
-
-function sanitizeFrequency(value: number): number {
-  if (!isFinite(value) || isNaN(value)) return 440;
-  return Math.max(20, Math.min(20000, value)); // human hearing range
-}
-```
+- Gain values: if not finite or NaN, substitute 0; otherwise clamp to [0, 1]
+- Frequency values: if not finite or NaN, substitute 440 Hz; otherwise clamp to [20, 20000]
+- Pitch/intensity curve evaluation: clamp all results to [0, 1]
 
 **Unstable Output Prevention:**
 
-- Clamp all curve evaluations to [0, 1]
 - Validate frequency range before applying
 - Check for NaN/Infinity before setting Web Audio parameters
 - If synthesis throws, fall back to silence rather than crash
 
 ### File Operations
 
-**Video Load Failure:**
+**Video Load Validation:**
 
-```typescript
-async function loadVideo(file: File): Promise<VideoMetadata> {
-  const url = URL.createObjectURL(file);
-  const video = document.createElement('video');
-  
-  return new Promise((resolve, reject) => {
-    video.addEventListener('loadedmetadata', () => {
-      const durationSeconds = video.duration;
-      const durationFrames = Math.floor(durationSeconds * 24);
-      
-      if (durationFrames > 60 * 24) {
-        reject(new Error('Video exceeds 60 second limit'));
-        return;
-      }
-      
-      resolve({
-        url,
-        durationFrames,
-        durationSeconds,
-        width: video.videoWidth,
-        height: video.videoHeight
-      });
-    });
-    
-    video.addEventListener('error', () => {
-      reject(new Error(`Cannot decode video: ${video.error?.message}`));
-    });
-    
-    video.src = url;
-  });
-}
-```
+- Check duration does not exceed 60 seconds (1440 frames)
+- Confirm file is decodable as video
+- Extract duration, width, height metadata
+- Show clear error for unsupported formats
 
 **Project Load Validation:**
 
-```typescript
-function validateProject(data: unknown): Project {
-  if (typeof data !== 'object' || data === null) {
-    throw new Error('Invalid project file: not an object');
-  }
-  
-  const obj = data as Record<string, unknown>;
-  
-  if (obj.version !== '1.0') {
-    throw new Error(`Unsupported project version: ${obj.version}`);
-  }
-  
-  // Validate structure, substitute defaults where needed
-  const project: Project = {
-    version: '1.0',
-    identityShelf: validateIdentityShelf(obj.identityShelf),
-    scenes: validateScenes(obj.scenes, obj.identityShelf),
-    activeSceneIndex: typeof obj.activeSceneIndex === 'number' 
-      ? obj.activeSceneIndex 
-      : 0
-  };
-  
-  return project;
-}
-```
+- Check version === '1.0'
+- Allow projects with missing identity IDs (cue retains its own curves)
+- Clamp frame numbers to scene duration
+- Enforce cue validity: startFrame < hitFrame < endFrame with at least one frame margin
+- Clamp curve point x and y to valid ranges
+- Substitute safe defaults for missing fields
 
-**Export Failure Recovery:**
+**Export Validation:**
 
-```typescript
-async function exportWAV(scene: Scene): Promise<Blob> {
-  try {
-    const buffer = await renderOffline(scene);
-    const wav = encodeWAV(buffer);
-    
-    // Verify before returning
-    const peakDB = verifyPeakLevel(buffer);
-    if (peakDB > -6.0) {
-      console.warn(`Peak level ${peakDB.toFixed(1)} dB exceeds -6 dBFS`);
-    }
-    
-    return new Blob([wav], { type: 'audio/wav' });
-  } catch (error) {
-    throw new Error(`Export failed: ${error.message}`);
-  }
-}
-```
+- Verify rendered buffer before encoding
+- Measure peak level and warn if exceeds -6 dBFS
+- Confirm WAV header matches content before download
 
 ### User-Facing Error Messages
 
@@ -858,100 +549,50 @@ async function exportWAV(scene: Scene): Promise<Blob> {
 
 ### State Recovery
 
-**Undo/Redo Implementation:**
+**Undo/Redo**
 
-```typescript
-interface ProjectSnapshot {
-  timestamp: number;
-  state: Project;
-}
+Maintain undo and redo stacks. On each edit action (draw on strip, move marker, change layer level, apply identity, save snapshot, delete cue):
 
-class UndoManager {
-  private undoStack: ProjectSnapshot[] = [];
-  private redoStack: ProjectSnapshot[] = [];
-  private maxStackSize = 50;
-  
-  pushState(project: Project): void {
-    this.undoStack.push({
-      timestamp: Date.now(),
-      state: deepClone(project)
-    });
-    
-    if (this.undoStack.length > this.maxStackSize) {
-      this.undoStack.shift();
-    }
-    
-    this.redoStack = []; // clear redo on new action
-  }
-  
-  undo(currentProject: Project): Project | null {
-    if (this.undoStack.length === 0) return null;
-    
-    this.redoStack.push({
-      timestamp: Date.now(),
-      state: deepClone(currentProject)
-    });
-    
-    const snapshot = this.undoStack.pop()!;
-    return snapshot.state;
-  }
-  
-  redo(currentProject: Project): Project | null {
-    if (this.redoStack.length === 0) return null;
-    
-    this.undoStack.push({
-      timestamp: Date.now(),
-      state: deepClone(currentProject)
-    });
-    
-    const snapshot = this.redoStack.pop()!;
-    return snapshot.state;
-  }
-}
-```
+1. Deep-clone the current project state
+2. Push to undo stack (max 50 entries)
+3. Clear redo stack
 
-**Actions that push undo state:**
-- Draw on strip
-- Move marker
-- Change layer level
-- Apply identity
-- Save snapshot
-- Delete cue
+On undo: move current state to redo stack, pop from undo stack.
+On redo: move current state to undo stack, pop from redo stack.
 
-**Actions that do NOT push undo state:**
-- Play/pause
-- Scrub timeline
-- Change volume
-- Toggle mute
-- A/B comparison toggle
+Actions that do NOT push undo state: play/pause, scrub timeline, volume, mute toggle, A/B comparison toggle.
+
+## First-Run State and Unsupported Browser Detection
+
+### Tour (REQ-A2)
+
+On first load: Check `sessionStorage.getItem('ghostreel_tour_seen')`. If null, display dismissible 3-4 step tour (parallel strips, hit marker, export). When dismissed, set sessionStorage flag. Display dismissible credit note linking to [https://collection.sciencemuseumgroup.org.uk/objects/co8188395/oramics-machine](https://collection.sciencemuseumgroup.org.uk/objects/co8188395/oramics-machine). Store credit dismissal in localStorage.
+
+### Unsupported Browser Detection (REQ-H1.5)
+
+Feature check: AudioContext, requestAnimationFrame, Float32Array, video MP4 support, OfflineAudioContext. If any missing, show: "GhostReel requires a modern browser. Tested on current Chrome for Windows and macOS."
 
 ## Testing Strategy
 
 ### Unit Tests
 
-**Specific examples and edge cases:**
+Test specific examples, edge cases, and error conditions:
 
-- Timeline conversion functions (frame/sample/time)
-- Curve evaluation at boundaries (x=0, x=1, x=0.5)
+- Timeline conversions at boundaries
+- Curve evaluation at x=0, x=0.5, x=1
 - Waveform buffer creation from simple curves
 - WAV header encoding with known parameters
-- Project serialization with minimal and maximal data
+- Project serialization (minimal and maximal)
 - Marker movement with boundary constraints
-- Peak level verification with known test signals
-
-**Integration points:**
-
-- Video element interaction (load, play, seek events)
-- Web Audio context lifecycle (real-time and offline)
-- File I/O (save project, load project, export WAV)
+- Peak level verification with known signals
+- Video element interaction (load, play, seek)
+- Web Audio context lifecycle
+- File I/O (save, load, export)
 - Canvas drawing and mouse interaction
-
-**Error conditions:**
-
-- Invalid video file
-- Video exceeds duration limit
-- Corrupt project file
-- Missing identity reference
+- Invalid video file handling
+- Video duration limit enforcement
+- Corrupt project file handling
+- Missing identity references
 - Out-of-bounds frame numbers
 
 ### Property-Based Tests
@@ -960,7 +601,6 @@ Property-based testing is appropriate for GhostReel because:
 
 - Core logic involves pure functions (timeline conversions, curve evaluation, data transformations)
 - Serialization and deserialization should round-trip reliably
-- Curve refitting has universal properties (anchor preservation)
 - Audio rendering has invariants (peak limits, duration accuracy)
 
 **Property test library:** fast-check (TypeScript)
@@ -976,290 +616,188 @@ Property-based testing is appropriate for GhostReel because:
 - **Property tests** verify universal properties across randomized inputs
 - Together they provide comprehensive coverage
 
-(Correctness Properties section will be written after prework analysis)
-
 ## Correctness Properties
 
 *A property is a characteristic or behavior that should hold true across all valid executions of a system—essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-### Property 1: Timeline Conversion Round Trip
+### Property 1: Timeline Conversion Round Trip (Frame-Sample-Frame)
 
-*For any* frame number in the valid range [0, 1440] (60 seconds at 24 fps), converting frame → sample → frame SHALL return the original frame number.
+**Test Type:** Node, fast-check, pure function
+
+*For any* frame number in [0, 1440], converting frame → sample → frame SHALL return the original frame number.
 
 **Validates: Requirements REQ-C1.3, REQ-C1.4, REQ-C1.5**
 
-### Property 2: Project Serialization Round Trip
+### Property 2: Timeline Conversion Round Trip (Frame-Time-Frame and Frame-SeekTime-Frame)
+
+**Test Type:** Node, fast-check, pure function
+
+*For any* frame number in [0, 1440], both frameToTime → timeToFrame and frameSeekTime → timeToFrame SHALL return the original frame number.
+
+**Validates: Requirements REQ-C1.3, REQ-C1.5**
+
+### Property 3: Project Serialization Round Trip
+
+**Test Type:** Node, fast-check, pure function
 
 *For any* valid project state, serializing to JSON and then deserializing SHALL produce an equivalent project with the same identities, cues, markers, and settings.
 
 **Validates: Requirements REQ-F1.1, REQ-F1.2, REQ-F1.3**
 
-### Property 3: Move Start Preserves Hit and Post-Hit
+### Property 4: Move Start Preserves Hit and Curve Points
 
-*For any* cue with start < hit < end, moving the start frame to a new position within [0, hit) SHALL preserve the hit frame position and all curve points in the post-hit segment (hit to end).
+**Test Type:** Node, fast-check, pure function
+
+*For any* cue with start < hit < end, moving the start frame to a new position within [0, hit) SHALL preserve the hit frame position and all curve point coordinates unchanged.
 
 **Validates: Requirements REQ-C3.1, REQ-C3.2, REQ-C3.6**
 
-### Property 4: Move End Preserves Hit and Pre-Hit
+### Property 5: Move End Preserves Hit and Curve Points
 
-*For any* cue with start < hit < end, moving the end frame to a new position within (hit, sceneDuration] SHALL preserve the hit frame position and all curve points in the pre-hit segment (start to hit).
+**Test Type:** Node, fast-check, pure function
 
-**Validates: Requirements REQ-C3.3**
+*For any* cue with start < hit < end, moving the end frame to a new position within (hit, sceneDuration] SHALL preserve the hit frame position and all curve point coordinates unchanged.
 
-### Property 5: Move Hit Preserves Segment Durations
+**Validates: Requirements REQ-C3.3, REQ-C3.6**
+
+### Property 6: Move Hit Preserves Segment Durations
+
+**Test Type:** Node, fast-check, pure function
 
 *For any* cue with start < hit < end, moving the hit frame SHALL move all three markers together such that (hit - start) and (end - hit) remain unchanged.
 
 **Validates: Requirements REQ-C3.4**
 
-### Property 6: Waveform Unchanged by Marker Movement
+### Property 7: Curve X=0.5 Maps to Hit Sample
 
-*For any* cue and any marker movement (start, hit, or end), the waveform curve SHALL remain identical to its original state.
+**Test Type:** Node, fast-check, pure function
 
-**Validates: Requirements REQ-C3.6**
+*For any* valid cue, curveXToSample(0.5, cue) SHALL equal frameToSample(cue.hitFrame) exactly.
 
-### Property 7: Identity Application Round Trip
+**Validates: New property - ensures piecewise mapping anchors correctly at hit**
+
+### Property 8: Curve Mapping is Monotonic
+
+**Test Type:** Node, fast-check, pure function
+
+*For any* valid cue and any two curve x values x1 < x2, curveXToSample(x1, cue) < curveXToSample(x2, cue).
+
+**Validates: New property - ensures curve-to-time mapping is strictly increasing**
+
+### Property 9: Identity Application Round Trip
+
+**Test Type:** Node, fast-check, pure function
 
 *For any* saved identity, applying it to a cue and then saving that cue's waveform as a new identity SHALL produce a waveform with equivalent curve points.
 
 **Validates: Requirements REQ-D1.4, REQ-D2.1**
 
-### Property 8: Layer Independence
+### Property 10: Layer Independence
+
+**Test Type:** Node, fast-check, pure function
 
 *For any* scene with multiple layers, editing one layer's cue (curves, markers, level) SHALL leave all other layers' cue data and settings unchanged.
 
 **Validates: Requirements REQ-C2.4, REQ-C3.6**
 
-### Property 9: Peak Level Ceiling
+### Property 11: Peak Level Ceiling
 
-*For any* scene with valid cues, the exported WAV file SHALL have a peak level at or below -6 dBFS when measured across all samples in all channels.
+**Test Type:** Node, fast-check, pure function (calls renderScene)
 
-**Validates: Requirements REQ-G1.6**
+*For any* scene with valid cues, renderScene SHALL produce a buffer with peak level ≤ 0.5 (within 1e-6 tolerance).
 
-### Property 10: Export Duration Accuracy
+**Validates: Requirements REQ-G1.6 (updated to 0.5 peak, not -6 dBFS)**
 
-*For any* scene with duration D frames, the exported WAV file SHALL contain exactly D × 2000 samples, matching the scene duration precisely.
+### Property 12: Export Duration Accuracy
+
+**Test Type:** Node, fast-check, pure function (calls renderScene)
+
+*For any* scene with duration D frames, renderScene SHALL return a Float32Array of length exactly D × 2000.
 
 **Validates: Requirements REQ-G1.4, REQ-C1.4**
 
-### Property 11: Curve Evaluation Range
+### Property 13: Pitch/Intensity Curve Evaluation Range
 
-*For any* curve and any x value in [0, 1], evaluating the curve SHALL return a y value in [0, 1], regardless of the curve's control points.
+**Test Type:** Node, fast-check, pure function
 
-**Validates: Requirements REQ-B3.5 (safe parameter values)**
+*For any* pitch or intensity curve and any x in [0, 1], evaluating the curve SHALL return y in [0, 1].
 
-### Property 12: Mute Excludes Layer
+**Validates: Requirements REQ-B3.5 (safe parameter values, note: Waveform curves return [-1, 1])**
 
-*For any* scene with at least one muted layer, the exported audio SHALL be equivalent to exporting with that layer removed from the scene.
+### Property 14: Mute Excludes Layer
+
+**Test Type:** Node, fast-check, pure function (calls renderScene)
+
+*For any* scene with at least one muted layer, the rendered audio SHALL be equivalent to rendering with that layer removed from the scene.
 
 **Validates: Requirements REQ-C2.3, REQ-G1.2**
 
-### Property 13: Snapshot Comparison Preserves Current State
+### Property 15: Snapshot Comparison Preserves Current State
+
+**Test Type:** Browser example test (requires UI state)
 
 *For any* layer with a saved snapshot, toggling A/B comparison on and off SHALL return the current cue to its exact state before comparison began.
 
 **Validates: Requirements REQ-E1.3, REQ-E1.4**
 
-### Property 14: Identity Editing Does Not Affect Existing Cues
+### Property 16: Identity Editing Does Not Affect Existing Cues
+
+**Test Type:** Node, fast-check, pure function
 
 *For any* cue created from an identity, subsequently editing and re-saving that identity SHALL leave the existing cue's waveform, pitch, and intensity curves unchanged.
 
 **Validates: Requirements REQ-D2.3**
 
-### Property 15: Stop Clears All Audio
+### Property 17: Stop Clears All Audio
 
-*For any* playback state with synthesized audio running, calling stop SHALL result in all audio ceasing within 100ms, and subsequent play/stop cycles SHALL never leave audio running.
+**Test Type:** Browser example test (requires Web Audio interaction)
+
+*For any* playback state with audio running, calling stop SHALL cease all audio within 100ms, and subsequent play/stop cycles SHALL never leave audio running.
 
 **Validates: Requirements REQ-B3.3**
 
-## Implementation Risks and Mitigation
+### Render Test: Hit Spike Lands at Hit Sample
 
-### High-Risk Areas
+**Test Type:** Node, example test (specific constructed cue)
 
-#### 1. Browser Audio Latency and Synchronization
+Given a cue with unequal lead-in and tail (e.g., startFrame=10, hitFrame=40, endFrame=100) and an intensity curve with a narrow spike at x=0.5, renderScene SHALL place the peak intensity sample at hitFrame × 2000, within ±5 samples tolerance.
 
-**Risk:** Web Audio playback and video playback use separate clocks. Drift may cause audio/video desynchronization during real-time preview.
+**Validates: Curve-to-time mapping correctness under asymmetric timing**
 
-**Mitigation:**
-- Use video `timeupdate` as the synchronization source
-- Accept that preview has jitter; prioritize export accuracy
-- Restart audio synthesis if drift exceeds 100ms
-- Document that frame-accurate preview is not guaranteed; only export is sample-accurate
-
-#### 2. Curve Refitting Complexity
-
-**Risk:** The anchored curve refitting logic (moving start refits pre-hit, moving end refits post-hit) is complex and error-prone.
-
-**Mitigation:**
-- Implement property tests for all marker movement scenarios
-- Visualize before/after curves in development UI
-- Test with extreme cases (1-frame segments, full scene spans)
-- Provide undo so users can recover from unexpected refitting
-
-#### 3. Memory Limits for 60-Second Clips
-
-**Risk:** Holding decoded video frames and offline-rendered audio in memory may exceed browser limits on lower-end hardware.
-
-**Mitigation:**
-- Measure memory usage on target hardware (test on laptop with 8GB RAM)
-- Use OfflineAudioContext which handles buffers internally
-- Release video URL objects when loading new clips
-- Document observed limits in README
-
-**Measured limit to document:** Maximum tested clip duration and resolution (e.g., "Tested with 60-second 1080p video on 8GB RAM Windows laptop, Chrome 120").
-
-#### 4. WAV Export Correctness
-
-**Risk:** Incorrect WAV header or sample encoding will produce files that audio editors reject or import incorrectly.
-
-**Mitigation:**
-- Test exported WAV files in DaVinci Resolve, Audacity, and Pro Tools (if available)
-- Validate WAV header with hex dump
-- Implement automated test: encode known buffer, decode, compare samples
-- Use established libraries if hand-coding proves unreliable (e.g., wav-encoder npm package)
-
-#### 5. Web Audio API Scheduling Precision
-
-**Risk:** `setValueAtTime()` scheduling may have precision limits or rounding that cause audible artifacts.
-
-**Mitigation:**
-- Sample curves at frame rate (24 fps = 41.67ms intervals), acceptable for parameter automation
-- Use `linearRampToValueAtTime()` for gain to smooth transitions
-- Test with high-frequency pitch modulation to detect artifacts
-- Document observed precision limits
-
-### Medium-Risk Areas
-
-#### 6. Canvas Drawing Performance
-
-**Risk:** Real-time strip rendering during video playback may drop frames on slower hardware.
-
-**Mitigation:**
-- Render strips at lower frequency than video frames (e.g., 10 fps)
-- Use requestAnimationFrame for drawing
-- Simplify strip rendering (fewer path points, simpler styling)
-- Profile on target hardware, optimize hot paths
-
-#### 7. Undo Stack Memory
-
-**Risk:** Deep-cloning entire project state 50 times may consume excessive memory.
-
-**Mitigation:**
-- Clone only the active scene, not the entire project
-- Compress undo states (delta encoding) if memory becomes an issue
-- Limit undo stack to 20 entries if necessary
-- Measure memory impact during testing
-
-#### 8. Video Seek Reliability
-
-**Risk:** Some video codecs (e.g., H.264 with long GOP) may seek to incorrect frames or produce visual glitches.
-
-**Mitigation:**
-- Recommend keyframe-rich encoding for reference videos
-- Test with both H.264 and VP9 codecs
-- Document observed seek behavior
-- Prioritize export accuracy over preview accuracy
-
-### Mitigation Summary
-
-The highest-risk items (audio/video sync, curve refitting, WAV export) are addressed through:
-
-1. **Property-based testing** for curve refitting and export correctness
-2. **Multi-tool validation** for WAV export (import into professional tools)
-3. **Acceptance of preview limitations** with focus on export accuracy
-4. **Measurement and documentation** of observed performance limits
-
-## Performance Considerations
+## Performance and Deployment
 
 ### Target Hardware
 
-- **Minimum:** Laptop with 8GB RAM, integrated graphics, current Chrome
-- **Tested:** Windows 10/11 and macOS 12+ on mid-range laptops
+Minimum: Laptop with 8GB RAM, integrated graphics, current Chrome.
 
 ### Performance Budget
 
-- **Initial load:** < 3 seconds to show bundled scene
-- **Video open:** < 5 seconds for 60-second 1080p clip
-- **Playback:** Smooth 24 fps video with real-time synthesis (no dropped frames)
-- **Export:** < 10 seconds for 60-second scene with 3 layers
-- **Project save:** < 1 second for typical project (< 100KB file)
-- **Strip rendering:** 10 fps minimum during playback
+- Initial load: < 3 seconds
+- Re-render after edit (60s scene, 1 layer): < 250 ms
+- Strip rendering: 60 fps target via requestAnimationFrame
+- Memory: < 250 MB working set
 
-### Memory Budget
+### Deployment
 
-- **Video:** ~200 MB for decoded 60-second 1080p clip (browser-managed)
-- **Audio buffers:** ~5 MB for 60-second stereo at 48 kHz (browser-managed)
-- **Undo stack:** ~5 MB for 20 snapshots
-- **Total working set:** < 250 MB
-
-### Optimization Strategies
-
-1. **Lazy rendering:** Only draw visible strip segments
-2. **Throttled updates:** Update strips at 10 fps during playback, not 24 fps
-3. **Buffer reuse:** Reuse AudioBuffer objects where possible
-4. **Minimal DOM:** Use Canvas for strips, not SVG or DOM elements
-5. **Efficient curves:** Linear interpolation only (cubic is stretch goal)
-
-### Measurement Plan
-
-Before deployment, measure and document:
-
-1. Memory usage during typical workflow (Chrome DevTools)
-2. Export time for 60-second scene with 3 layers
-3. Playback smoothness (video frame drops) on target laptop
-4. Initial load time on slow network (3G simulation)
-
-Report these measurements in the README under a "Performance" section.
-
-## Deployment
-
-### Build Process
-
-```bash
-npm run build
-# Produces static files in dist/
-# - index.html
-# - assets/*.js (code-split bundles)
-# - assets/*.css
-# - bundled-assets/ (demo video files)
-```
-
-### Hosting
-
-- **Host:** Vercel, Netlify, or GitHub Pages (any static host)
-- **URL:** Custom domain or platform-provided subdomain
-- **HTTPS:** Required (browser security policies for video and audio)
-- **CORS:** Not needed (all assets served from same origin)
-
-### Asset Attribution
-
-Bundled demonstration videos must include:
-
-- **Credits.md** in repository documenting permissions
-- Clear attribution in app UI (footer or about screen)
-- Original footage or properly licensed with documented permissions
-
-### Availability Guarantee
-
-- App must remain deployed and accessible until 29 January 2027
-- Choose host with free tier or pay for hosting period
-- Set calendar reminder to check availability weekly
+- Host: Vercel, Netlify, or GitHub Pages (static hosting)
+- HTTPS required (browser security policies)
+- Available until 29 January 2027
+- Tested on current Chrome (Windows and macOS)
 
 ### Pre-Deployment Checklist
 
-- [ ] Complete demonstration scenario works end-to-end
+- [ ] Demo scenario works end-to-end
 - [ ] Export → import into video editor → verify hit lands on correct frame
-- [ ] Tested on Chrome Windows and Chrome macOS
-- [ ] Unsupported browser message displays correctly
-- [ ] All bundled assets have documented permissions
+- [ ] Tested on Chrome Windows and macOS
+- [ ] Unsupported browser message works
+- [ ] Bundled assets documented
 - [ ] README includes performance measurements
-- [ ] LICENSE file at repository root (MIT)
-- [ ] `.kiro` directory in repository, not in `.gitignore`
-- [ ] Deployment URL documented in submission materials
+- [ ] LICENSE file present
+- [ ] Deployment URL documented
 
 ## Open Questions
 
-None at this time. All technical questions from the brief (section 8) have been addressed in this design.
+1. **Measured render time:** How long does renderScene take for a 60-second scene with three layers on target hardware (current laptop, Windows/macOS)?
 
 ## Appendix: Starter Recipes
 
@@ -1267,133 +805,24 @@ None at this time. All technical questions from the brief (section 8) have been 
 
 A rhythmic low-frequency pulse for building dread.
 
-```typescript
-const tensionPulse: Identity = {
-  id: 'starter-tension-pulse',
-  name: 'Tension Pulse',
-  waveform: {
-    points: [
-      { x: 0.0, y: 0.0 },
-      { x: 0.25, y: 0.7 },
-      { x: 0.5, y: 0.0 },
-      { x: 0.75, y: -0.7 },
-      { x: 1.0, y: 0.0 }
-    ],
-    interpolation: 'linear'
-  },
-  defaultPitch: {
-    points: [
-      { x: 0.0, y: 0.2 },
-      { x: 0.5, y: 0.3 },
-      { x: 1.0, y: 0.2 }
-    ],
-    interpolation: 'linear'
-  },
-  defaultIntensity: {
-    points: [
-      { x: 0.0, y: 0.0 },
-      { x: 0.3, y: 0.6 },
-      { x: 0.5, y: 1.0 },
-      { x: 0.7, y: 0.6 },
-      { x: 1.0, y: 0.0 }
-    ],
-    interpolation: 'linear'
-  },
-  recipeSettings: {
-    baseFrequency: 110,
-    frequencyRange: [60, 220],
-    gainRange: [0, 0.4]
-  }
-};
-```
+- **Waveform:** Triangle-ish shape (0 → 0.7 → 0 → -0.7 → 0)
+- **Pitch:** Low, subtle movement (60-220 Hz range, 0.2-0.3 normalized)
+- **Intensity:** Peak at hit (0 → 0.6 → 1.0 → 0.6 → 0)
 
 ### Energy Build and Release
 
 A rising pitch and intensity that releases at the hit.
 
-```typescript
-const energyBuild: Identity = {
-  id: 'starter-energy-build',
-  name: 'Energy Build',
-  waveform: {
-    points: [
-      { x: 0.0, y: 0.0 },
-      { x: 0.33, y: 0.8 },
-      { x: 0.66, y: -0.8 },
-      { x: 1.0, y: 0.0 }
-    ],
-    interpolation: 'linear'
-  },
-  defaultPitch: {
-    points: [
-      { x: 0.0, y: 0.2 },
-      { x: 0.5, y: 0.8 }, // hit: peak frequency
-      { x: 1.0, y: 0.1 }
-    ],
-    interpolation: 'linear'
-  },
-  defaultIntensity: {
-    points: [
-      { x: 0.0, y: 0.1 },
-      { x: 0.5, y: 1.0 }, // hit: peak intensity
-      { x: 0.8, y: 0.3 },
-      { x: 1.0, y: 0.0 }
-    ],
-    interpolation: 'linear'
-  },
-  recipeSettings: {
-    baseFrequency: 220,
-    frequencyRange: [110, 880],
-    gainRange: [0, 0.5]
-  }
-};
-```
+- **Waveform:** Asymmetric sawtooth (0 → 0.8 → -0.8 → 0)
+- **Pitch:** Rise to peak at hit (110-880 Hz range, 0.2 → 0.8 → 0.1)
+- **Intensity:** Peak at hit, decay (0.1 → 1.0 → 0.3 → 0)
 
 ### Stylized Presence
 
 An eerie, sustained tone with subtle movement.
 
-```typescript
-const stylizedPresence: Identity = {
-  id: 'starter-stylized-presence',
-  name: 'Stylized Presence',
-  waveform: {
-    points: [
-      { x: 0.0, y: 0.0 },
-      { x: 0.2, y: 0.5 },
-      { x: 0.4, y: 0.0 },
-      { x: 0.6, y: -0.3 },
-      { x: 0.8, y: 0.0 },
-      { x: 1.0, y: 0.0 }
-    ],
-    interpolation: 'linear'
-  },
-  defaultPitch: {
-    points: [
-      { x: 0.0, y: 0.4 },
-      { x: 0.3, y: 0.5 },
-      { x: 0.5, y: 0.45 },
-      { x: 0.7, y: 0.5 },
-      { x: 1.0, y: 0.4 }
-    ],
-    interpolation: 'linear'
-  },
-  defaultIntensity: {
-    points: [
-      { x: 0.0, y: 0.0 },
-      { x: 0.2, y: 0.6 },
-      { x: 0.5, y: 0.7 },
-      { x: 0.8, y: 0.6 },
-      { x: 1.0, y: 0.0 }
-    ],
-    interpolation: 'linear'
-  },
-  recipeSettings: {
-    baseFrequency: 165,
-    frequencyRange: [110, 330],
-    gainRange: [0, 0.35]
-  }
-};
-```
+- **Waveform:** Complex shape with harmonics (0 → 0.5 → 0 → -0.3 → 0 → 0)
+- **Pitch:** Slow variation around mid-range (110-330 Hz, 0.4-0.5 normalized)
+- **Intensity:** Sustained with gentle shape (0 → 0.6 → 0.7 → 0.6 → 0)
 
 These recipes will be refined during implementation to ensure they produce recognizable, editable sounds that demonstrate the strip-drawing concept effectively.
