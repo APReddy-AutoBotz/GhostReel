@@ -53,9 +53,9 @@
 
 - **Video Component:** HTML5 video element wrapper, exposes playback time and frame position, responds to play/pause/seek, emits frame updates via requestAnimationFrame
 
-- **Pure Renderer:** `renderScene(scene, sampleRate) -> RenderResult`. Wavetable synthesis, per-sample curve evaluation, mixing, peak limiting. No Web Audio dependency, testable in Node
+- **Pure Renderer:** `renderScene(scene, sampleRate) -> RenderResult`. Wavetable synthesis, per-sample curve evaluation, mixing, peak limiting. No Web Audio dependency, testable in Node. Located in `src/engine/` which is pure TypeScript with no React, DOM or Web Audio imports
 
-- **Playback Engine:** Connects rendered buffer to Web Audio via AudioBufferSourceNode, starts at offset matching video.currentTime, detects and fixes audio/video drift (>40ms), applies volume
+- **Playback Engine:** Connects rendered buffer to Web Audio via AudioBufferSourceNode, starts at offset matching video.currentTime, detects and fixes audio/video drift (>40ms), applies volume. Located in `src/playback/`
 
 - **Strip Editor Canvas:** Renders three strips per layer, handles drawing interactions, displays cue markers on strips and timeline, scrolls in sync with video via requestAnimationFrame (60 fps target). Waveform strip tiles single-cycle waveform; editing any tile edits the cycle
 

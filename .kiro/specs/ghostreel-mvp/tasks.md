@@ -28,7 +28,7 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Create README.md with project description and setup instructions
   - Create .gitignore that does NOT exclude `.kiro/` directory
   - Ensure `.kiro/specs/ghostreel-mvp/` directory is present
-  - Configure Vite's `base` option for the repository path in vite.config.ts
+  - Configure Vite's `base` option to '/GhostReel/' (exact casing) in vite.config.ts
   - Ensure all asset URLs (including bundled videos) respect the base path
   - Create GitHub Actions workflow at `.github/workflows/deploy.yml` that builds and deploys to GitHub Pages
   - Stop and inform user to enable Pages in repository settings (Settings > Pages > Source: GitHub Actions)
@@ -106,7 +106,8 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - _Requirements: REQ-B1.3, REQ-B1.4_
 
 - [ ] 13. Implement wavetable preparation with band-limiting
-  - Implement `prepareWavetable(curve: Curve): Float32Array` in `src/engine/synthesis.ts`
+  - Implement `buildWavetables(curve: Curve)` in `src/engine/synthesis.ts`
+  - Returns the full set of per-octave band-limited tables (not one array)
   - Sample curve to 2048-point table
   - Remove DC offset
   - Normalize peak to ±1
@@ -162,7 +163,9 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - _Requirements: REQ-C3.4_
 
 - [ ] 19. Implement phase accumulator synthesis for single cue
-  - Implement `renderCue(cue: Cue, sampleRate: number, output: Float32Array, layerLevel: number): void` in `src/engine/synthesis.ts`
+  - Implement `renderCue(cue: Cue, sampleRate: number, output: Float32Array): void` in `src/engine/synthesis.ts`
+  - Layer level is NOT applied here
+  - Extract per-sample gain (intensity curve plus cue fades) as pure function `cueGainAtSample(cue, sample)` and use it inside renderCue
   - Use phase accumulator with wavetable lookup
   - Apply frequency from pitch curve via recipe frequencyRange
   - Apply gain from intensity curve via recipe gainRange
@@ -175,7 +178,7 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Implement `renderLayer(layer: Layer, durationFrames: number, sampleRate: number): Float32Array` in `src/engine/synthesis.ts`
   - Allocate fresh buffer for layer duration
   - Call renderCue for the layer's cue (if present and not muted)
-  - Apply layer level
+  - Apply layer level here and nowhere else
   - Return layer buffer (do NOT write into shared buffer)
   - _Requirements: REQ-B1.6, REQ-C2.5_
 
@@ -224,13 +227,16 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Tag: `// Feature: ghostreel-mvp, Property 14: Mute Excludes Layer`
   - _Requirements: REQ-C2.3, REQ-G1.2_
 
-- [ ] 26. Write render test for hit spike lands at hit sample
-  - **Render Test: Hit Spike Lands at Hit Sample**
-  - **Validates: Curve-to-time mapping correctness under asymmetric timing**
-  - Construct cue with unequal lead-in and tail (e.g., startFrame=10, hitFrame=40, endFrame=100)
+- [ ] 26. Write render tests for hit spike accuracy
+  - **Render Test 1: Intensity Spike at Hit Sample**
+  - Construct cue with startFrame=10, hitFrame=40, endFrame=100
   - Use intensity curve with narrow spike at x=0.5
-  - Verify peak sample occurs at hitFrame × 2000, within ±5 samples tolerance
-  - Tag: `// Feature: ghostreel-mvp, Render Test: Hit Spike Lands at Hit Sample`
+  - Verify maximum of cueGainAtSample over the cue is at exactly sample 80000
+  - Tag: `// Feature: ghostreel-mvp, Render Test 1: Intensity Spike at Hit Sample`
+  - **Render Test 2: Audio Peak Near Hit Sample**
+  - Same cue, pitch held at 1000 Hz
+  - Verify largest absolute sample in rendered audio lies within 48 samples of sample 80000
+  - Tag: `// Feature: ghostreel-mvp, Render Test 2: Audio Peak Near Hit Sample`
   - _Requirements: REQ-C1.4, REQ-B1.5_
 
 - [ ] 27. Implement WAV encoder
@@ -272,17 +278,18 @@ Core strategy: Build the audio engine first with pure functions testable in Node
 
 - [ ] 31. Measure and record render performance
   - Create test scene with 60 seconds (1440 frames), 3 layers with cues
-  - Measure time for renderScene call
-  - Record result in README.md under "Performance" section
-  - Verify result is under 250ms budget
-  - If over budget, implement per-layer caching now
+  - Measure time for renderLayer call for one layer
+  - Measure time for renderScene call for three layers
+  - Record BOTH measurements in README.md under "Performance" section
+  - The 250ms budget applies to the one-layer figure
+  - If one-layer figure is over 250ms budget, implement per-layer caching now
   - _Requirements: REQ-H1.4_
 
 ### CHECKPOINT: Stage B Review
 
 - [ ] 32. Checkpoint - Ensure all tests pass and engine works
   - Ensure all property tests pass
-  - Ensure render test passes
+  - Ensure render tests pass
   - Ensure test page can audition all three recipes, redraw waveform, play, and export
   - Ensure performance measurement is documented
   - Stop and wait for user
@@ -294,7 +301,7 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Create main layout component with:
     - Picture display on top
     - Strip canvas area under fixed playhead
-    - Transport controls
+    - Transport controls: play, stop, and labelled volume control
     - Layer controls
     - Identity shelf
   - Replace test page as default view
@@ -306,23 +313,28 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Wrap HTML5 video element
   - Provide controls for play, pause, seek
   - Emit currentTime updates via requestAnimationFrame
-  - Support loading user video files and bundled videos
+  - Video control offers "Shot 1", "Shot 2" and "Open your own video"
+  - Until two-scene task is done, choosing one replaces active scene's video and duration and clears its cues, but keeps identity shelf
   - Validate duration ≤ 60 seconds
   - Require user confirmation of 24 fps frame rate
   - Show descriptive error for unsupported or too-long videos
   - _Requirements: REQ-A1.3, REQ-A1.4, REQ-A1.5, REQ-A1.6_
 
-- [ ] 35. Create bundled starter scene with placeholder clip
-  - If ffmpeg is installed, generate a 10-second, 24 fps test clip with large burned-in frame counter
-  - If ffmpeg is NOT installed, stop and ask user to provide a video file
+- [ ] 35. Create bundled starter scene with placeholder clips
+  - Generate TWO clips with ffmpeg, 24 fps with large burned-in frame counter:
+    - 8 seconds at `public/videos/shot1.mp4`
+    - 12 seconds at `public/videos/shot2.mp4`
+  - If ffmpeg is NOT installed, stop and ask user to provide video files
   - Do NOT download any video from the internet
-  - Place generated or user-provided video in `public/videos/`
   - Create starter cue with recognizable waveform, pitch, and intensity curves
   - Place in initial project state
   - _Requirements: REQ-A1.1, REQ-B2.1, REQ-B2.2_
 
 - [ ] 36. Implement playback engine
-  - Create `src/engine/playback.ts`
+  - Create or resume AudioContext only inside user gesture
+  - Move playback.ts and renderCoordinator.ts to `src/playback/` directory
+  - Add to structure.md: src/engine is pure TypeScript with no React, DOM or Web Audio imports
+  - Create `src/playback/playback.ts`
   - Connect rendered buffer to Web Audio via AudioBufferSourceNode
   - Start playback at offset matching video.currentTime
   - Check drift every 100ms: if |video.currentTime - audioTime| > 0.040s, stop and restart audio
@@ -331,7 +343,7 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - _Requirements: REQ-A1.2, REQ-B3.1, REQ-B3.2, REQ-B3.3_
 
 - [ ] 37. Implement render coordinator with debouncing
-  - Create `src/engine/renderCoordinator.ts`
+  - Create `src/playback/renderCoordinator.ts`
   - Trigger re-render after strip edits (debounced during drag)
   - Cache one rendered buffer per layer
   - Re-render only edited layer when curves or markers change
@@ -364,6 +376,7 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - When applying a recipe or identity to an empty layer, create a new cue at the playhead position
   - Use default lead-in duration: 12 frames (0.5 seconds)
   - Use default tail duration: 12 frames (0.5 seconds)
+  - If default lead-in or tail would fall outside scene, shift the cue so it fits and stays valid, including when playhead is at frame 0
   - Place hit marker at playhead frame
   - Apply recipe/identity curves and settings
   - _Requirements: REQ-D1.4_
@@ -383,29 +396,21 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Ensure drawing on strips updates curves
   - Ensure markers can be moved
   - Ensure playback engine synchronizes audio and video
+  - After ten rapid play/stop presses no audio is left running
+  - Audio stops within 100ms of pressing stop
   - Stop and wait for user
 
-### Stage D: Layers, Identities, Snapshots, Undo/Redo
+### Stage D: Layer Controls, Identity Management, Export, Visual Design, and First Full Deployment
 
 - [ ] 44. Implement layer controls
   - Create `src/components/LayerControls.tsx`
   - Provide layer selection (up to 3 layers)
   - Provide mute toggle and level slider per layer
+  - Provide "Clear cue" control per layer
   - Update project state on interaction
   - _Requirements: REQ-C2.1, REQ-C2.2, REQ-C2.3_
 
-- [ ] 45. Write property test for layer independence
-  - **Property 10: Layer Independence**
-  - **Validates: Requirements REQ-C2.4, REQ-C3.6**
-  - For any scene with multiple layers, editing one layer's cue leaves all other layers' cue data and settings unchanged
-  - Generate scenes with multiple layers
-  - Apply edits to one layer
-  - Verify other layers unchanged
-  - Run 100 iterations minimum
-  - Tag: `// Feature: ghostreel-mvp, Property 10: Layer Independence`
-  - _Requirements: REQ-C2.4, REQ-C3.6_
-
-- [ ] 46. Implement identity shelf UI
+- [ ] 45. Implement identity shelf UI
   - Create `src/components/IdentityShelf.tsx`
   - Display list of saved identities by name (initially the three starter recipes)
   - Provide controls to save current cue as new identity
@@ -414,109 +419,58 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Provide controls to delete identity
   - _Requirements: REQ-D1.1, REQ-D1.3, REQ-D2.1_
 
-- [ ] 47. Implement identity application logic
+- [ ] 46. Implement identity application logic
   - Implement `applyIdentityToCue` function in `src/utils/identity.ts`
   - Copy identity's waveform, recipe settings, and default curves to cue
   - Fit pitch and intensity curves to cue's start, hit, and end frames (preserve x=0.5 at hit)
   - Store identity ID as provenance only
   - _Requirements: REQ-D1.4, REQ-D1.5_
 
-- [ ] 48. Write property test for identity application round trip
-  - **Property 9: Identity Application Round Trip**
-  - **Validates: Requirements REQ-D1.4, REQ-D2.1**
-  - For any saved identity, applying it to a cue and then saving that cue's waveform as a new identity produces equivalent curve points
-  - Generate random identities and cues
-  - Compare waveform curves
-  - Run 100 iterations minimum
-  - Tag: `// Feature: ghostreel-mvp, Property 9: Identity Application Round Trip`
-  - _Requirements: REQ-D1.4, REQ-D2.1_
-
-- [ ] 49. Implement identity editing without affecting existing cues
+- [ ] 47. Implement identity editing without affecting existing cues
   - When identity is edited and saved, update only that identity in shelf
   - Do NOT alter existing cues or snapshots until user explicitly reapplies identity
   - _Requirements: REQ-D2.2, REQ-D2.3_
 
-- [ ] 50. Write property test for identity editing isolation
-  - **Property 16: Identity Editing Does Not Affect Existing Cues**
-  - **Validates: Requirements REQ-D2.3**
-  - For any cue created from an identity, subsequently editing and re-saving that identity leaves the existing cue's curves unchanged
-  - Generate identity, create cue from it, edit identity, verify cue unchanged
-  - Run 100 iterations minimum
-  - Tag: `// Feature: ghostreel-mvp, Property 16: Identity Editing Does Not Affect Existing Cues`
-  - _Requirements: REQ-D2.3_
-
-- [ ] 51. Implement snapshot save and A/B comparison
-  - Add "Save Snapshot" control to layer
-  - Store snapshot in layer.snapshot
-  - Add "Compare" toggle control
-  - When comparing, switch playback and strip display between current cue and snapshot
-  - User can play either version
-  - _Requirements: REQ-E1.2, REQ-E1.3, REQ-E1.4_
-
-- [ ] 52. Implement undo/redo
-  - Create `src/utils/undo.ts`
-  - On each edit action (draw, move marker, change level, apply identity, save snapshot, delete cue), deep-clone project state and push to undo stack
-  - Maintain max 50 entries in undo stack
-  - On undo: move current state to redo stack, pop from undo stack
-  - On redo: move current state to undo stack, pop from redo stack
-  - Do NOT push undo state for: play/pause, scrub, volume, mute toggle, comparison toggle
-  - _Requirements: REQ-E1.1_
-
-### Stage E: Save/Reopen and Two Scenes
-
-- [ ] 53. Implement project serialization
-  - Implement `serializeProject(project: Project): string` in `src/utils/project.ts`
-  - Convert project to JSON with version '1.0'
-  - Return JSON string
-  - _Requirements: REQ-F1.1_
-
-- [ ] 54. Implement project deserialization with validation
-  - Implement `deserializeProject(json: string): Project` in `src/utils/project.ts`
-  - Parse JSON and check version === '1.0'
-  - Allow projects with missing identity IDs (identityId is provenance only)
-  - Clamp frame numbers to scene duration
-  - Enforce cue validity: startFrame < hitFrame < endFrame with at least 1 frame margin
-  - Clamp curve point x and y to valid ranges
-  - Substitute safe defaults for missing fields
-  - _Requirements: REQ-F1.2, REQ-F1.3_
-
-- [ ] 55. Write property test for project serialization round trip
-  - **Property 3: Project Serialization Round Trip**
-  - **Validates: Requirements REQ-F1.1, REQ-F1.2, REQ-F1.3**
-  - For any valid project state, serializing to JSON and then deserializing produces equivalent project
-  - Generate random projects with fc.record
-  - Compare identities, cues, markers, and settings
-  - Run 100 iterations minimum
-  - Tag: `// Feature: ghostreel-mvp, Property 3: Project Serialization Round Trip`
-  - _Requirements: REQ-F1.1, REQ-F1.2, REQ-F1.3_
-
-- [ ] 56. Implement project save and open UI
-  - Add "Save Project" button that calls serializeProject and downloads JSON file
-  - Add "Open Project" button that prompts for JSON file, calls deserializeProject, and loads result
-  - For bundled videos, reload automatically
-  - For user videos, prompt to re-select file and display expected fileName
-  - _Requirements: REQ-F1.1, REQ-F1.2, REQ-F1.4, REQ-F1.5, REQ-F1.6_
-
-- [ ] 57. Implement two-scene project support
-  - Extend project to hold up to 2 scenes with activeSceneIndex
-  - Add scene switcher UI control
-  - When switching scenes, re-render the new scene's audio
-  - Preserve identity shelf across scene switches
-  - _Requirements: REQ-D3.1, REQ-D3.2, REQ-D3.3_
-
-### Stage F: Export and In-App Sync Check
-
-- [ ] 58. Implement export UI with error handling
+- [ ] 48. Implement export UI with error handling
   - Add "Export Audio" button
   - Call renderScene for active scene
-  - Convert mono buffer to stereo (duplicate channel)
+  - Pass mono buffer straight to encodeWAV (no separate stereo conversion step)
   - Call encodeWAV with 48000 Hz sample rate
   - Download WAV file with descriptive name (e.g., "ghostreel_scene1.wav")
   - On failure, show error message and leave project unchanged
   - When reductionDb is not zero, display the reduction value to the user
   - _Requirements: REQ-G1.1, REQ-G1.3, REQ-G1.4, REQ-G1.7, REQ-G1.8, REQ-B3.6_
 
-- [ ] 59. Implement export verification workflow
+- [ ] 49. Implement credit note
+  - Display dismissible credit note naming Daphne Oram and Oramics
+  - Link to [https://collection.sciencemuseumgroup.org.uk/objects/co8188395/oramics-machine](https://collection.sciencemuseumgroup.org.uk/objects/co8188395/oramics-machine)
+  - Store dismissal in localStorage
+  - _Requirements: REQ-A2.4_
+
+- [ ] 50. Apply visual design direction
+  - Apply visual direction from product.md across the application:
+    - Film-strip treatment of strips (perforations, frame-like borders)
+    - Restrained haunting palette (deep blacks, muted grays, subtle accent colors)
+    - Readable labels and timeline with clear contrast
+    - Consistent spacing and typography
+  - Ensure design reinforces the Oramics resurrection concept
+  - _Requirements: REQ-A1.7_
+
+- [ ] 51. First full deployment
+  - If user has replaced shot1.mp4 and shot2.mp4 with real footage, update scene durations and starter cue to fit
+  - Deploy to GitHub Pages
+  - Run the demonstration scenario on the live URL:
+    1. Play the first shot and hear the starter cue
+    2. Redraw the waveform, pitch, and intensity strips and hear the sound change
+    3. Place the cue's hit marker on a chosen picture frame
+    4. Save the sound's character as a named identity
+    5. Export the scene audio
+  - Verify all steps work on deployed build
+  - _Requirements: REQ-H1.1, REQ-H1.2, REQ-H1.3_
+
+### Stage E: Export Verification, A/B Comparison, Two Scenes, Save/Reopen, Undo
+
+- [ ] 52. Implement export verification workflow
   - Add "Load Exported WAV" button
   - Parse WAV header to extract sample rate, channel count, duration
   - Display these values and warn if they differ from expected
@@ -527,43 +481,119 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Allow toggling between exported playback and live synthesis
   - _Requirements: REQ-G2.1, REQ-G2.2, REQ-G2.3, REQ-G2.4, REQ-G2.5_
 
-### Stage G: First-Run State, Polish, Deployment
+- [ ] 53. Implement snapshot save and A/B comparison
+  - Add "Save Snapshot" control to layer
+  - Store snapshot in layer.snapshot
+  - Add "Compare" toggle control
+  - When comparing, switch playback and strip display between current cue and snapshot
+  - User can play either version
+  - Toggling compare on and off leaves current cue unchanged
+  - _Requirements: REQ-E1.2, REQ-E1.3, REQ-E1.4_
 
-- [ ] 60. Implement first-run tour
+- [ ] 54. Implement two-scene project support
+  - Extend project to hold up to 2 scenes with activeSceneIndex
+  - Add scene switcher UI control
+  - When switching scenes, re-render the new scene's audio
+  - Preserve identity shelf across scene switches
+  - _Requirements: REQ-D3.1, REQ-D3.2, REQ-D3.3_
+
+- [ ] 55. Implement project serialization
+  - Implement `serializeProject(project: Project): string` in `src/utils/project.ts`
+  - Convert project to JSON with version '1.0'
+  - Return JSON string
+  - _Requirements: REQ-F1.1_
+
+- [ ] 56. Implement project deserialization with validation
+  - Implement `deserializeProject(json: string): Project` in `src/utils/project.ts`
+  - Parse JSON and check version === '1.0'
+  - Allow projects with missing identity IDs (identityId is provenance only)
+  - Clamp frame numbers to scene duration
+  - Enforce cue validity: startFrame < hitFrame < endFrame with at least 1 frame margin
+  - Clamp curve point x and y to valid ranges
+  - Substitute safe defaults for missing fields
+  - _Requirements: REQ-F1.2, REQ-F1.3_
+
+- [ ] 57. Write property test for project serialization round trip
+  - **Property 3: Project Serialization Round Trip**
+  - **Validates: Requirements REQ-F1.1, REQ-F1.2, REQ-F1.3**
+  - For any valid project state, serializing to JSON and then deserializing produces equivalent project
+  - Generate random projects with fc.record
+  - Compare identities, cues, markers, and settings
+  - Run 100 iterations minimum
+  - Tag: `// Feature: ghostreel-mvp, Property 3: Project Serialization Round Trip`
+  - _Requirements: REQ-F1.1, REQ-F1.2, REQ-F1.3_
+
+- [ ] 58. Implement project save and open UI
+  - Add "Save Project" button that calls serializeProject and downloads JSON file
+  - Add "Open Project" button that prompts for JSON file, calls deserializeProject, and loads result
+  - For bundled videos, reload automatically
+  - For user videos, prompt to re-select file and display expected fileName
+  - _Requirements: REQ-F1.1, REQ-F1.2, REQ-F1.4, REQ-F1.5, REQ-F1.6_
+
+- [ ] 59. Implement undo/redo
+  - Create `src/utils/undo.ts`
+  - On each edit action (draw, move marker, change level, apply identity, save snapshot, delete cue), deep-clone project state and push to undo stack
+  - Maintain max 50 entries in undo stack
+  - On undo: move current state to redo stack, pop from undo stack
+  - On redo: move current state to undo stack, pop from redo stack
+  - Do NOT push undo state for: play/pause, scrub, volume, mute toggle, comparison toggle
+  - _Requirements: REQ-E1.1_
+
+### Stage F: Property Tests and Polish
+
+- [ ] 60. Write property test for layer independence
+  - **Property 10: Layer Independence**
+  - **Validates: Requirements REQ-C2.4, REQ-C3.6**
+  - For any scene with multiple layers, editing one layer's cue leaves all other layers' cue data and settings unchanged
+  - Generate scenes with multiple layers
+  - Apply edits to one layer
+  - Verify other layers unchanged
+  - Run 100 iterations minimum
+  - Tag: `// Feature: ghostreel-mvp, Property 10: Layer Independence`
+  - _Requirements: REQ-C2.4, REQ-C3.6_
+
+- [ ] 61. Write property test for identity application round trip
+  - **Property 9: Identity Application Round Trip**
+  - **Validates: Requirements REQ-D1.4, REQ-D2.1**
+  - For any saved identity, applying it to a cue and then saving that cue's waveform as a new identity produces equivalent curve points
+  - Generate random identities and cues
+  - Compare waveform curves
+  - Run 100 iterations minimum
+  - Tag: `// Feature: ghostreel-mvp, Property 9: Identity Application Round Trip`
+  - _Requirements: REQ-D1.4, REQ-D2.1_
+
+- [ ] 62. Write property test for identity editing isolation
+  - **Property 16: Identity Editing Does Not Affect Existing Cues**
+  - **Validates: Requirements REQ-D2.3**
+  - For any cue created from an identity, subsequently editing and re-saving that identity leaves the existing cue's curves unchanged
+  - Generate identity, create cue from it, edit identity, verify cue unchanged
+  - Run 100 iterations minimum
+  - Tag: `// Feature: ghostreel-mvp, Property 16: Identity Editing Does Not Affect Existing Cues`
+  - _Requirements: REQ-D2.3_
+
+- [ ] 63. Implement first-run tour
   - Check sessionStorage.getItem('ghostreel_tour_seen')
   - If null, display dismissible 3-4 step tour
   - Tour points out: parallel strips, hit marker, export control
   - When dismissed, set sessionStorage flag
   - _Requirements: REQ-A2.1, REQ-A2.2, REQ-A2.3_
 
-- [ ] 61. Implement credit note
-  - Display dismissible credit note naming Daphne Oram and Oramics
-  - Link to [https://collection.sciencemuseumgroup.org.uk/objects/co8188395/oramics-machine](https://collection.sciencemuseumgroup.org.uk/objects/co8188395/oramics-machine)
-  - Store dismissal in localStorage
-  - _Requirements: REQ-A2.4_
-
-- [ ] 62. Implement unsupported browser detection
+- [ ] 64. Implement unsupported browser detection
   - Feature check: AudioContext, requestAnimationFrame, Float32Array, video MP4 support, OfflineAudioContext
   - If any missing, show: "GhostReel requires a modern browser. Tested on current Chrome for Windows and macOS."
   - _Requirements: REQ-H1.5_
 
-- [ ] 63. Add plain-language labels and accessibility
+- [ ] 65. Add plain-language labels and accessibility
   - Label all controls with descriptive text
   - Ensure no state is shown by color alone
   - Add ARIA labels where appropriate
   - _Requirements: REQ-B2.3_
 
-- [ ] 64. Apply visual design direction
-  - Apply visual direction from product.md across the application:
-    - Film-strip treatment of strips (perforations, frame-like borders)
-    - Restrained haunting palette (deep blacks, muted grays, subtle accent colors)
-    - Readable labels and timeline with clear contrast
-    - Consistent spacing and typography
-  - Ensure design reinforces the Oramics resurrection concept
-  - _Requirements: REQ-A1.7_
+### Stage G: Final Deployment
 
-- [ ] 65. Final deployment and verification
+- [ ] 66. Final deployment and verification
   - Add asset credits file documenting all external assets used
+  - README lists any requirement not implemented in final build
   - Add README sections for:
     - Performance measurements
     - System limits (60 seconds, 24 fps, 3 layers)
@@ -576,22 +606,21 @@ Core strategy: Build the audio engine first with pure functions testable in Node
   - Document deployment URL in README
   - _Requirements: REQ-H1.1, REQ-H1.2, REQ-H1.3, REQ-H1.4_
 
-- [ ] 66. Final checkpoint - Ensure all tests pass
+- [ ] 67. Final checkpoint - Ensure all tests pass
   - Ensure all unit tests pass
   - Ensure all property tests pass
-  - Ensure render test passes
+  - Ensure render tests pass
   - Ensure deployed build completes demonstration scenario
   - Ask the user if questions arise.
 
 ## Notes
 
-- Tasks marked with `*` are optional and can be skipped for faster MVP (none in this plan - all property tests are required)
+- All tasks are required (no optional tasks in this plan)
 - Each task references specific requirements for traceability
 - Checkpoints ensure incremental validation at key milestones
 - Property tests validate universal correctness properties across randomized inputs
-- Unit tests (if added) would validate specific examples and edge cases
 - The pure renderScene function is testable in Node without browser dependencies
-- Stages B and C include explicit stop-and-wait checkpoints for user review
+- Stage C includes explicit stop-and-wait checkpoint for user review
 
 ## Task Dependency Graph
 
@@ -635,19 +664,20 @@ Core strategy: Build the audio engine first with pure functions testable in Node
     { "id": 34, "tasks": ["46"] },
     { "id": 35, "tasks": ["47"] },
     { "id": 36, "tasks": ["48"] },
-    { "id": 37, "tasks": ["49"] },
-    { "id": 38, "tasks": ["50"] },
-    { "id": 39, "tasks": ["51", "52"] },
+    { "id": 37, "tasks": ["49", "50"] },
+    { "id": 38, "tasks": ["51"] },
+    { "id": 39, "tasks": ["52"] },
     { "id": 40, "tasks": ["53"] },
     { "id": 41, "tasks": ["54"] },
     { "id": 42, "tasks": ["55"] },
-    { "id": 43, "tasks": ["56", "57"] },
-    { "id": 44, "tasks": ["58"] },
-    { "id": 45, "tasks": ["59"] },
-    { "id": 46, "tasks": ["60", "61", "62", "63"] },
-    { "id": 47, "tasks": ["64"] },
-    { "id": 48, "tasks": ["65"] },
-    { "id": 49, "tasks": ["66"] }
+    { "id": 43, "tasks": ["56"] },
+    { "id": 44, "tasks": ["57"] },
+    { "id": 45, "tasks": ["58"] },
+    { "id": 46, "tasks": ["59"] },
+    { "id": 47, "tasks": ["60", "61", "62"] },
+    { "id": 48, "tasks": ["63", "64", "65"] },
+    { "id": 49, "tasks": ["66"] },
+    { "id": 50, "tasks": ["67"] }
   ]
 }
 ```
